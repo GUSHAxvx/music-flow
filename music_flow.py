@@ -348,18 +348,86 @@ def step_env():
     return env
 
 
+def spawn_detached(args, cwd=None):
+    """启动一个**长期运行的外部服务**，并让它脱离应用进程树。
+
+    为什么必须这样做：应用支持「停止」，停止的实现是 taskkill /T 杀整棵进程树。
+    如果 Docker Desktop / Syncthing 是由应用 Popen 出来的子进程，它们会被
+    一起杀掉 —— 实测踩过这个坑：点停止后 Syncthing 被误杀，后续步骤全部失败。
+
+    实现方式：交给 PowerShell 的 Start-Process。
+    直接用 subprocess 的 DETACHED_PROCESS / CREATE_BREAKAWAY_FROM_JOB 实测**无效**
+    —— 父进程仍是本应用，taskkill /T 照样杀得到。
+    Start-Process 由 PowerShell 自己 fork，父进程是 PowerShell 而非本应用，
+    因此应用退出或被 taskkill 都不影响它（已实测验证）。
+    """
+    exe = args[0]
+    rest = list(args[1:])
+    # 构造 PowerShell 参数列表：每个参数都用单引号包住并转义内部单引号
+    def q(x):
+        return "'" + str(x).replace("'", "''") + "'"
+
+    arglist = ",".join(q(a) for a in rest)
+    ps = (f"Start-Process -FilePath {q(exe)}"
+          + (f" -ArgumentList @({arglist})" if rest else "")
+          + (f" -WorkingDirectory {q(cwd)}" if cwd else "")
+          + " -WindowStyle Hidden")
+    try:
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, close_fds=True)
+        return True
+    except Exception as exc:
+        log(f"独立启动失败，退回直接启动: {exc}", "warn")
+        try:
+            subprocess.Popen(args, cwd=cwd, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            return True
+        except Exception as exc2:
+            log(f"启动失败: {exc2}", "error")
+            return False
+
+
+def syncthing_ping(gui, api_key, timeout=5):
+    """探测 Syncthing GUI 是否可用。
+
+    返回 None 表示正常，否则返回错误说明字符串
+    —— 报出具体原因比只说「未响应」有用得多。
+    """
+    import urllib.request
+    url = (gui or "http://127.0.0.1:8384").rstrip("/") + "/rest/system/status"
+    hdr = {"X-API-Key": api_key} if api_key else {}
+    try:
+        req = urllib.request.Request(url, headers=hdr)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            r.read(1)
+        return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
+def proc_running(image):
+    """检查某个可执行进程是否在运行（用 tasklist，比 Get-Process 更可靠）"""
+    try:
+        r = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {image}"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30)
+        return image.lower() in (r.stdout or "").lower()
+    except Exception:
+        return False
+
+
 def s_docker_start(cfg):
     exe = cfg["docker"]["desktop_exe"]
     log("检查 Docker Desktop…")
-    r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Docker Desktop.exe"],
-                       capture_output=True, text=True, encoding="utf-8",
-                       errors="replace")
-    if "Docker Desktop.exe" not in (r.stdout or ""):
+    if not proc_running("Docker Desktop.exe"):
         if not os.path.exists(exe):
             log(f"找不到 Docker Desktop.exe: {exe}", "error")
             return False
         log("启动 Docker Desktop（首次约 30-60 秒）…")
-        subprocess.Popen([exe])
+        spawn_detached([exe])
     ok = False
     for i in range(60):
         p = subprocess.run([DOCKER, "info"], capture_output=True)
@@ -392,28 +460,38 @@ def s_containers_start(cfg):
 
 
 def s_syncthing_start(cfg):
-    p = subprocess.run(["tasklist", "/FI", "IMAGENAME eq syncthing.exe"],
-                       capture_output=True, text=True, encoding="utf-8",
-                       errors="replace")
-    if "syncthing.exe" not in (p.stdout or ""):
-        exe = cfg["sync"]["syncthing_exe"]
+    s = cfg["sync"]
+    if not proc_running("syncthing.exe"):
+        exe = s["syncthing_exe"]
         if not os.path.exists(exe):
             log(f"找不到 syncthing.exe: {exe}", "error")
             return False
         log("启动 Syncthing…")
-        subprocess.Popen([exe, *cfg["sync"]["syncthing_args"]])
-    for i in range(30):
-        try:
-            import urllib.request
-            req = urllib.request.Request(
-                cfg["sync"]["syncthing_gui"] + "/rest/system/status",
-                headers={"X-API-Key": cfg["sync"]["api_key"]})
-            with urllib.request.urlopen(req, timeout=5):
-                log("Syncthing 就绪", "ok")
-                return True
-        except Exception:
-            time.sleep(2)
-    log("Syncthing GUI 未响应", "error")
+        # 必须独立启动：否则点「停止」时会被 taskkill /T 一起杀掉
+        spawn_detached([exe, *s["syncthing_args"]], cwd=os.path.dirname(exe))
+    else:
+        log("Syncthing 进程已在运行")
+
+    last_err = None
+    for i in range(60):                       # 60 × 2s = 120s（首次启动可能较慢）
+        err = syncthing_ping(s["syncthing_gui"], s.get("api_key", ""))
+        if err is None:
+            log("Syncthing GUI 就绪", "ok")
+            return True
+        last_err = err
+        if i % 5 == 4:
+            log(f"  等待 Syncthing GUI… ({(i + 1) * 2}s)")
+        time.sleep(2)
+
+    log("Syncthing GUI 120 秒内未响应", "error")
+    if last_err:
+        log(f"  最后一次探测错误: {last_err}", "error")
+    log("  排查建议：", "error")
+    log("    1) 是否已有另一个 Syncthing 实例占用配置目录（会报 lock 冲突）", "error")
+    log(f"    2) 端口是否被占用：netstat -ano | findstr 8384", "error")
+    log(f"    3) 手动运行看报错：\"{s['syncthing_exe']}\" "
+        + " ".join(s["syncthing_args"]), "error")
+    log(f"    4) 看日志：C:\\ProgramData\\Syncthing\\data\\syncthing.log", "error")
     return False
 
 
@@ -537,11 +615,7 @@ def s_sync(cfg):
             return json.loads(body) if body else {}
 
     def gui_alive():
-        try:
-            api("/rest/system/status", timeout=5)
-            return True
-        except Exception:
-            return False
+        return syncthing_ping(s["syncthing_gui"], s.get("api_key", "")) is None
 
     # ---- 0. 确保 Syncthing 在运行 ----
     if not s.get("api_key") or not s.get("phone_device"):
@@ -554,17 +628,22 @@ def s_sync(cfg):
         log("Syncthing 未运行，尝试启动…", "warn")
         exe = s["syncthing_exe"]
         if os.path.exists(exe):
-            subprocess.Popen([exe, *s["syncthing_args"]])
+            # 独立启动，避免被「停止」误杀
+            spawn_detached([exe, *s["syncthing_args"]],
+                           cwd=os.path.dirname(exe))
         else:
             log(f"找不到 syncthing.exe: {exe}", "error")
             return False
-        for i in range(30):
-            time.sleep(2)
-            if gui_alive():
+        last_err = None
+        for i in range(45):                   # 45 × 2s = 90s
+            err = syncthing_ping(s["syncthing_gui"], s.get("api_key", ""))
+            if err is None:
                 log("Syncthing 已启动并就绪", "ok")
                 break
+            last_err = err
+            time.sleep(2)
         else:
-            log("Syncthing 启动后 60 秒内 GUI 仍不可达", "error")
+            log(f"Syncthing 启动后 90 秒内 GUI 仍不可达（{last_err}）", "error")
             return False
 
     # ---- 1. 触发本地扫描 ----
