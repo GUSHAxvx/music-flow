@@ -49,6 +49,12 @@ FFPROBE = (r"C:\Users\Administrator\AppData\Local\Microsoft"
            r"\WinGet\Links\ffprobe.exe")
 PY = sys.executable
 
+# 曲库在容器内的挂载点（已确认 music-monitor 把 D:\go-music-dl\downloads
+# 挂在 /downloads）。
+# 为什么下载脚本要知道曲库：否则取流临时失败时会把一首**已经在库里的歌**
+# 误加入屏蔽名单（踩过这个坑）。
+CONTAINER_LIB = "/downloads"
+
 os.makedirs(LOGS, exist_ok=True)
 
 
@@ -507,6 +513,7 @@ def s_download(cfg):
     }
     args = [DOCKER, "exec",
             "-e", "DOWNLOAD_POLICY=" + json.dumps(policy, ensure_ascii=False),
+            "-e", f"LIBRARY_DIR={CONTAINER_LIB}",
             "music-monitor", "python", cfg["advanced"]["manage_library_py"],
             "--workers", "4",
             "--target", str(d["max_albums"]),
@@ -515,24 +522,28 @@ def s_download(cfg):
     log(f"下载策略: Hi-Res={policy['accept_hires']} "
         f"无损={policy['accept_lossless']} 有损={policy['accept_lossy']} "
         f"最低码率={policy['min_bitrate']}kbps")
+    log(f"曲库目录（容器内）: {CONTAINER_LIB}")
     ok, _ = run_cmd(args, step="download", env=step_env())
     return ok
 
 
 def staged_hires_count():
-    """数一下容器暂存里有多少个音频文件。
+    """读计划里 Hi-Res 的条目数 —— 用作 library-manager 的 -HiResTarget。
 
-    用途：给 library-manager 的 -HiResTarget 做上限钳制。
-    library-manager 有个安全阈值（实际数量 < 目标-15 就中止，防下载残缺），
-    如果这里传的「目标」比实际暂存数量大太多，它会误判成「下载未完成」而中止
-    —— 这正是「第 5 步永远失败」的根因。
+    为什么不能数暂存文件数：暂存里同时有 Hi-Res 和无损
+    （例如 234 Hi-Res + 28 无损 = 262 个文件），
+    而 -HiResTarget 比的是**计划里 Hi-Res 的数量**。
+    拿 262 去比 234 会触发 library-manager 的安全中止
+    （实际数 < 目标-15 就判定「下载未完成」）—— 踩过这个坑。
+
+    所以直接读 plan.json 的 hires 数组长度，这才是它要的数字。
     """
     try:
         r = subprocess.run(
             [DOCKER, "exec", "music-monitor", "python", "-c",
-             "import os;d='/app/data/hires_staging';"
-             "print(len([f for f in os.listdir(d) "
-             "if os.path.isfile(os.path.join(d,f))]))"],
+             "import json;"
+             "p=json.load(open('/app/data/plan.json',encoding='utf-8'));"
+             "print(len(p.get('hires') or []))"],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=60)
         s = (r.stdout or "").strip()
@@ -548,12 +559,17 @@ def s_maintain(cfg):
 
     actual = staged_hires_count()
     if actual:
+        # 计划里的 Hi-Res 数量才是权威值。
+        # library-manager 的判定是「实际 < 目标-15 就中止」，所以：
+        #   目标比实际大 → 必然误报中止，必须下调
+        #   目标比实际小一点（<15）→ 无害，保留用户设置
+        #   目标比实际小很多   → 可能把想保留的曲目精简掉，上调到实际
         if target > actual:
-            log(f"检测到暂存实际有 {actual} 首，把目标从 {target} 下调为 {actual}"
-                f"（避免 library-manager 误判为「下载未完成」而中止）", "warn")
+            log(f"计划里 Hi-Res 实际 {actual} 首，把目标从 {target} 下调为 {actual}"
+                f"（避免误判「下载未完成」而中止）", "warn")
             target = actual
         elif target < actual - 15:
-            log(f"目标 {target} 明显小于暂存实际 {actual}，上调为 {actual}", "warn")
+            log(f"目标 {target} 明显小于实际 {actual}，上调为 {actual}", "warn")
             target = actual
 
     args = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
