@@ -145,8 +145,8 @@ async function runStep(id) {
 
 /* 手动导入：弹出系统对话框选文件/文件夹，后端执行导入 */
 async function doImport(mode) {
-  $('#btn-import-files').disabled = true;
-  $('#btn-import-folder').disabled = true;
+  document.querySelectorAll('#btn-import-files, #btn-import-folder, .import-btn')
+    .forEach(b => { b.disabled = true; });
   appendLog({ ts: '', level: 'head', message:
     mode === 'folder' ? '── 导入文件夹：请在弹出的窗口中选择 ──'
                       : '── 导入歌曲：请在弹出的窗口中选择 ──' });
@@ -161,8 +161,8 @@ async function doImport(mode) {
   } finally {
     // 对话框是阻塞式的，这里留一点时间再恢复按钮
     setTimeout(() => {
-      $('#btn-import-files').disabled = false;
-      $('#btn-import-folder').disabled = false;
+      document.querySelectorAll('#btn-import-files, #btn-import-folder, .import-btn')
+        .forEach(b => { b.disabled = false; });
     }, 1500);
   }
 }
@@ -203,8 +203,8 @@ async function pollStatus() {
     $('#btn-stop').disabled = !r.running;
     document.querySelectorAll('.step-run').forEach(b => { b.disabled = !!r.running; });
     const busy = !!r.running;
-    const bf = $('#btn-import-files'), bd = $('#btn-import-folder');
-    if (bf && bd) { bf.disabled = busy; bd.disabled = busy; }
+    document.querySelectorAll('#btn-import-files, #btn-import-folder, .import-btn')
+      .forEach(b => { b.disabled = busy; });
     if (r.results) {
       Object.entries(r.results).forEach(([k, v]) => {
         setStepState(k, v === 'ok' ? 'ok' : (v === 'warn' ? 'warn' : 'fail'));
@@ -317,6 +317,7 @@ function renderSettings() {
   box.innerHTML = '';
   FIELDS.forEach(g => {
     const sec = el('div', 'card grp');
+    sec.dataset.grp = g.grp;
     sec.append(el('h3', null, g.title));
     sec.append(el('span', 'muted', g.note));
     g.items.forEach(it => {
@@ -395,6 +396,30 @@ function renderSettings() {
     box.append(sec);
   });
   applyGating();
+  mountImportButtons();
+}
+
+/* 在设置页的「导入」分组里挂上导入按钮。
+   用户要求在设置里就能导入，所以这里也放一份 ——
+   和「控制台」顶部那份功能相同，共用同一套绑定逻辑。 */
+function mountImportButtons() {
+  document.querySelectorAll('#settings-form .import-actions').forEach(n => n.remove());
+  const grp = document.querySelector('#settings-form [data-grp="import"]');
+  if (!grp) return;
+  const row = el('div', 'row');
+  const lbl = el('div', 'lbl');
+  lbl.append(el('b', null, '开始导入'));
+  lbl.append(el('em', null, '点下面的按钮，会弹出系统窗口让你选文件或文件夹'));
+  row.append(lbl);
+
+  const ctl = el('div', 'ctl import-actions');
+  const bf = el('button', 'ghost-btn import-btn', '导入歌曲文件…');
+  const bd = el('button', 'ghost-btn import-btn', '导入整个文件夹…');
+  bf.onclick = () => doImport('files');
+  bd.onclick = () => doImport('folder');
+  ctl.append(bf); ctl.append(bd);
+  row.append(ctl);
+  grp.append(row);
 }
 
 /* 联动：某个开关打开时，把受它管辖的输入框禁用掉。

@@ -411,3 +411,13 @@ body.mode-auto .step-run { display: none; }
 .import-actions .ghost-btn:hover:not(:disabled) {
   border-color: var(--accent); color: var(--fg);
 }
+
+/* 设置页里的导入按钮 */
+.ctl.import-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.import-btn {
+  border-color: var(--accent-dim); background: var(--accent-dim);
+  color: var(--fg); padding: 8px 18px;
+}
+.import-btn:hover:not(:disabled) {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
