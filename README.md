@@ -217,8 +217,9 @@ Windows 下也可以直接双击：
 | `accept_hires` | 接受 24bit Hi-Res |
 | `accept_lossless` | 接受 16bit 无损（CD 规格） |
 | `accept_lossy` | 接受有损（128k/320k）。想补只有有损版本的歌时才开 |
-| `max_albums` | Hi-Res 目标数量。应用会自动与暂存实际数量比对后钳制 |
-| `lossless_target` | 保留多少首普通无损 |
+| `only_new_lossless` | **无损只跟新歌**（默认开）。只下载基线之后新增的、且只有无损版本的歌，不回填历史。打开时 `lossless_target` 被完全忽略 |
+| `lossless_target` | 仅在 `only_new_lossless` 关闭时生效：回填多少首历史无损 |
+| `max_albums` | 首次回填规模。**曲库建立基线后此值不生效**（代码里被主动绕过） |
 | `sort_mode` | `bitrate` 优先高码率 / `newest` 优先最新收藏 |
 | `min_bitrate` | 最低码率，0 = 不限 |
 
@@ -341,7 +342,20 @@ subprocess.run([docker, "exec", "-e", 'DOWNLOAD_POLICY={"accept_hires":true}', .
 
 反过来，如果按扩展名写 ID3 到 FLAC 文件上，会在文件开头插入 `ID3\x04` 头，**破坏文件**。
 
-### 8. 有些 mp3 的 ffprobe 输出带尾逗号
+### 8. 「移出计划」被当成「该删除」——误删了 27 首歌
+
+无损严格模式会把历史无损移出计划。而落盘脚本原本的逻辑是
+「凡是不在保留集里的文件一律删除」，于是把这些**用户已经拥有**的歌清掉了
+（实测从 264 首掉到 237 首）。
+
+修法：落盘脚本只删除**屏蔽名单里明确拦截的**文件，其余一律保留：
+
+    $toDelete = @($notKept | Where-Object { $blockedSet.ContainsKey(...) })
+
+教训：**自动删除必须要有明确白名单依据**，不能靠「不在计划里」这种
+间接推断 —— 计划会因为各种配置变化而收缩。
+
+### 9. 有些 mp3 的 ffprobe 输出带尾逗号
 
 ```
 "44100,"   # 直接 int() 会炸

@@ -373,3 +373,21 @@ body.mode-auto .step-run { display: none; }
   width: 106px; flex: none; text-align: right;
   font-variant-numeric: tabular-nums; color: var(--fg-mute); font-size: 12.8px;
 }
+
+/* ═══════════ 只读项与联动禁用 ═══════════ */
+.roval {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 12px; border-radius: 7px;
+  background: var(--bg); border: 1px dashed var(--line2);
+}
+.roval b { font-family: var(--mono); font-size: 14px; color: var(--fg-mute); }
+.roval-tag {
+  font-size: 12px; padding: 2px 8px; border-radius: 5px;
+  background: var(--line); color: var(--fg-mute);
+}
+
+.row.gated { opacity: .55; }
+.gate-hint {
+  font-size: 12.5px; color: var(--warn);
+  padding: 4px 9px; border-radius: 6px; background: #2a2213;
+}

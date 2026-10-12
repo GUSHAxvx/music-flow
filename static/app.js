@@ -212,8 +212,14 @@ const FIELDS = [
       { k: 'accept_hires', t: '接受 24bit Hi-Res', d: '关闭后即使平台有 Hi-Res 也不下', type: 'bool' },
       { k: 'accept_lossless', t: '接受 16bit 无损（CD 规格）', d: '关闭后只收 Hi-Res', type: 'bool' },
       { k: 'accept_lossy', t: '接受有损（128k / 320k）', d: '⚠ 打开后低品质文件也会被下载。想补某些只有有损版本的歌时才开', type: 'bool', danger: true },
-      { k: 'max_albums', t: 'Hi-Res 目标数量', d: '会自动与暂存实际数量比对后取合适值，一般不用改', type: 'num' },
-      { k: 'lossless_target', t: '无损目标数量', d: '保留多少首普通无损', type: 'num' },
+      { k: 'only_new_lossless', t: '无损只跟新歌', gates: 'lossless_target', d: '打开后：只下载你新收藏里只有无损版本的歌，不去回填历史无损。' +
+          '此时下方的「无损目标数量」会被完全忽略（不用管它）。关闭后才按目标数量回填历史。',
+        type: 'bool' },
+      { k: 'lossless_target', t: '无损目标数量', d: '仅在「无损只跟新歌」关闭时生效：回填多少首历史无损。' +
+          '数字越大挖得越深（300 首约多占 5-8 GB）', type: 'num', gatedBy: 'only_new_lossless' },
+      { k: 'max_albums', t: '首次回填规模', d: '只在还没建立基线时用于控制首次批量下载的规模。' +
+          '你的曲库已建立基线（839 首历史曲目已冻结），所以这个值当前不生效，日常也不用改。',
+        type: 'readonly' },
       { k: 'sort_mode', t: '挑选顺序', d: '决定新收藏里优先抓哪些', type: 'select',
         options: [
           { v: 'bitrate', label: '优先高码率 —— 更容易拿到高采样率（推荐）' },
@@ -287,16 +293,28 @@ function renderSettings() {
       const ctl = el('div', 'ctl');
       const val = CONFIG[g.grp] ? CONFIG[g.grp][it.k] : undefined;
 
-      if (it.type === 'bool') {
+      if (it.type === 'readonly') {
+        // 只读说明项：显示当前值，明确标出「不生效」，避免用户白调
+        const box = el('div', 'roval');
+        box.append(el('b', null, String(val)));
+        box.append(el('span', 'roval-tag', '当前不生效'));
+        ctl.append(box);
+      } else if (it.type === 'bool') {
         const sw = el('label', 'switch');
         const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!val;
         cb.dataset.g = g.grp; cb.dataset.k = it.k; cb.dataset.t = 'bool';
+        if (it.gates) cb.dataset.gates = it.gates;
         sw.append(cb); sw.append(el('span', 'slider'));
+        if (it.gates) {
+          // 这个开关会接管别的输入：一变就重算联动状态
+          cb.addEventListener('change', applyGating);
+        }
         ctl.append(sw);
         if (it.danger) sw.title = '谨慎开启';
       } else if (it.type === 'num') {
         const inp = el('input'); inp.type = 'number'; inp.value = val ?? 0;
         inp.dataset.g = g.grp; inp.dataset.k = it.k; inp.dataset.t = 'num';
+        if (it.gatedBy) inp.dataset.gatedBy = it.gatedBy;
         ctl.append(inp);
       } else if (it.type === 'select') {
         const sel = el('select');
@@ -339,6 +357,33 @@ function renderSettings() {
       sec.append(row);
     });
     box.append(sec);
+  });
+  applyGating();
+}
+
+/* 联动：某个开关打开时，把受它管辖的输入框禁用掉。
+   例：无损只跟新歌 = 打开时，「无损目标数量」被完全忽略，
+   所以这里不仅禁用输入，还会加一行说明，避免用户以为改了有用。 */
+function applyGating() {
+  document.querySelectorAll('#settings-form [data-gated-by]').forEach(inp => {
+    const gateKey = inp.dataset.gatedBy;
+    const gate = document.querySelector(
+      '#settings-form input[data-k="' + gateKey + '"][data-t="bool"]');
+    if (!gate) return;
+    const off = gate.checked;                 // 开关打开 → 目标值不生效
+    inp.disabled = off;
+    const row = inp.closest('.row');
+    let hint = row.querySelector('.gate-hint');
+    if (off) {
+      if (!hint) {
+        hint = el('span', 'gate-hint', '已被上方开关接管，此处改动不生效');
+        row.querySelector('.ctl').append(hint);
+      }
+      row.classList.add('gated');
+    } else {
+      if (hint) hint.remove();
+      row.classList.remove('gated');
+    }
   });
 }
 

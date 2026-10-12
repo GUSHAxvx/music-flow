@@ -67,8 +67,9 @@ DEFAULT_CONFIG = {
         "accept_hires": True,          # 接受 24bit Hi-Res
         "accept_lossless": True,       # 接受 16bit 无损
         "accept_lossy": False,         # 接受有损（128k/320k）—— 默认关闭，避免音质降级
-        "max_albums": 400,             # Hi-Res 目标数量（有基线后不再强制上限）
-        "lossless_target": 30,         # 无损目标数量
+        "only_new_lossless": True,     # 无损只跟新歌，不回填历史（严格模式）
+        "max_albums": 400,             # 首次回填规模；有基线时该值不生效
+        "lossless_target": 30,         # 无损目标数量（仅在 only_new_lossless 关闭时有意义）
         "sort_mode": "bitrate",        # bitrate=优先高码率 / newest=优先最新收藏
         "min_bitrate": 0,              # 低于此码率不下载（0=不限）
     },
@@ -503,13 +504,18 @@ def s_syncthing_start(cfg):
 
 def s_download(cfg):
     d = cfg["download"]
-    # 把「哪些音质可下载」的策略用环境变量传进容器。
-    # 注意：docker exec 默认不继承宿主机的环境变量，必须显式 -e 传入。
+    # 无损严格模式：只跟基线之后的新歌，不回填历史。
+    # 打开时**必须彻底忽略 lossless_target** —— 不是「传个大值」而是
+    # 明确告诉脚本「不限量、只取新增」。避免两个旋钮互相打架出 bug。
+    strict = bool(d.get("only_new_lossless", True))
+    lossless_target = 10 ** 6 if strict else int(d.get("lossless_target") or 30)
+
     policy = {
         "accept_hires": bool(d.get("accept_hires", True)),
         "accept_lossless": bool(d.get("accept_lossless", True)),
         "accept_lossy": bool(d.get("accept_lossy", False)),
         "min_bitrate": int(d.get("min_bitrate") or 0),
+        "only_new_lossless": strict,
     }
     args = [DOCKER, "exec",
             "-e", "DOWNLOAD_POLICY=" + json.dumps(policy, ensure_ascii=False),
@@ -517,11 +523,14 @@ def s_download(cfg):
             "music-monitor", "python", cfg["advanced"]["manage_library_py"],
             "--workers", "4",
             "--target", str(d["max_albums"]),
-            "--lossless-target", str(d["lossless_target"]),
+            "--lossless-target", str(lossless_target),
             "--sort", d["sort_mode"]]
     log(f"下载策略: Hi-Res={policy['accept_hires']} "
         f"无损={policy['accept_lossless']} 有损={policy['accept_lossy']} "
         f"最低码率={policy['min_bitrate']}kbps")
+    log("无损范围: " + ("仅基线后的新歌（不限量，不回填历史）"
+                        if strict else
+                        f"含历史回填，目标 {lossless_target} 首"))
     log(f"曲库目录（容器内）: {CONTAINER_LIB}")
     ok, _ = run_cmd(args, step="download", env=step_env())
     return ok
