@@ -1,0 +1,18 @@
+# 默认用 LF
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则双击会报 "'xxx' is not recognized"
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.ico binary
+*.flac binary
+*.mp3 binary
+
+# 语言统计修正（这些是生成物/数据，不算代码）
+logs/** linguist-generated=true
+library_stats.json linguist-generated=true

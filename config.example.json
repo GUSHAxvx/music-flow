@@ -1,0 +1,52 @@
+{
+  "_comment": "Music Flow 配置模板。复制为 config.json 后按需修改。config.json 已被 .gitignore 排除，不会提交到仓库。",
+
+  "download": {
+    "note": "决定哪些歌会被下载",
+    "accept_hires": true,
+    "accept_lossless": true,
+    "accept_lossy": false,
+    "max_albums": 240,
+    "lossless_target": 30,
+    "sort_mode": "bitrate",
+    "min_bitrate": 0
+  },
+
+  "guard": {
+    "note": "决定哪些歌会被拦截，不进同步文件夹",
+    "block_sample_rates": [176400],
+    "block_channels": [],
+    "block_reason_176400": "176.4kHz 在本机手机链路上会输出噪声，实测炸耳",
+    "content_mismatch_blocklist": true
+  },
+
+  "sync": {
+    "note": "同步到手机。device_id / api_key 属于个人信息，请填自己的。",
+    "folder_id": "go-music-dl-downloads",
+    "phone_device": "",
+    "api_key": "",
+    "syncthing_gui": "http://127.0.0.1:8384",
+    "syncthing_exe": "C:\\Program Files\\Syncthing\\syncthing.exe",
+    "syncthing_args": [
+      "--config=C:\\ProgramData\\Syncthing\\config",
+      "--data=C:\\ProgramData\\Syncthing\\data",
+      "--no-browser"
+    ],
+    "downloads_dir": "D:\\go-music-dl\\downloads"
+  },
+
+  "docker": {
+    "desktop_exe": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe",
+    "containers": ["go-music-dl", "music-monitor"]
+  },
+
+  "advanced": {
+    "note": "依赖的外部脚本（一般不用改）",
+    "library_manager": "D:\\music-monitor\\library-manager.ps1",
+    "manage_library_py": "/app/manage_library.py",
+    "tag_files_py": "D:\\music-monitor\\tag_files.py",
+    "check_integrity_py": "D:\\music-monitor\\check_integrity.py",
+    "samplerate_guard_py": "D:\\music-monitor\\samplerate_guard_host.py",
+    "audit_quality_ps1": "D:\\music-monitor\\audit_quality.ps1"
+  }
+}

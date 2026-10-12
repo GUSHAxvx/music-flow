@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Music Flow · 音乐管家</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot" id="conn-dot"></span>
+    <strong>Music Flow</strong>
+    <span class="sub">音乐下载 · 监测 · 同步</span>
+  </div>
+
+  <div class="mode-switch" role="tablist">
+    <button class="mode-btn active" data-mode="auto" id="btn-auto">
+      <b>省心模式</b><i>一键跑全流程</i>
+    </button>
+    <button class="mode-btn" data-mode="manual" id="btn-manual">
+      <b>观察模式</b><i>逐步执行 / 排错</i>
+    </button>
+  </div>
+
+  <div class="stats" id="stats">
+    <div class="stat"><em>曲库</em><span id="st-lib">—</span></div>
+    <div class="stat"><em>手机</em><span id="st-phone">—</span></div>
+    <div class="stat"><em>同步</em><span id="st-sync">—</span></div>
+  </div>
+</header>
+
+<div class="shell">
+
+  <nav class="side">
+    <button class="nav-btn active" data-view="console">控制台</button>
+    <button class="nav-btn" data-view="library">曲库</button>
+    <button class="nav-btn" data-view="settings">设置</button>
+    <button class="nav-btn" data-view="logic">运行逻辑</button>
+    <button class="nav-btn" data-view="blocked">拦截清单</button>
+    <button class="nav-btn" data-view="runs">运行日志</button>
+  </nav>
+
+  <main class="main">
+
+    <!-- ══════════ 控制台 ══════════ -->
+    <section class="view active" id="view-console">
+
+      <div class="auto-panel" id="auto-panel">
+        <button class="big-btn" id="btn-sync">
+          <b>同步</b>
+          <i>检查新收藏 · 下载 · 落盘 · 传给手机</i>
+        </button>
+        <button class="ghost-btn" id="btn-stop" disabled>停止</button>
+        <div class="auto-hint">
+          连接热点后点一下即可。全流程自动执行，出错会停在那一步并在日志里标红。
+        </div>
+      </div>
+
+      <div class="steps-head">
+        <h2>流水线</h2>
+        <span class="tip" id="steps-tip">省心模式下按顺序自动执行；切到观察模式可单步运行</span>
+      </div>
+      <div class="steps" id="steps"></div>
+
+      <div class="logwrap">
+        <div class="logbar">
+          <h2>实时日志</h2>
+          <label class="chk"><input type="checkbox" id="autoscroll" checked> 自动滚动</label>
+          <label class="chk"><input type="checkbox" id="onlyerr"> 只看错误</label>
+          <button class="mini-btn" id="btn-clear">清空</button>
+        </div>
+        <div class="log" id="log"></div>
+      </div>
+
+    </section>
+
+    <!-- ══════════ 曲库 ══════════ -->
+    <section class="view" id="view-library">
+      <div class="page-head">
+        <h2>曲库</h2>
+        <p>当前同步文件夹里所有曲目的真实规格（用 ffprobe 实测，不看扩展名）。</p>
+      </div>
+      <div class="lib-summary" id="lib-summary"></div>
+      <div class="lib-grid" id="lib-grid"></div>
+      <div class="savebar">
+        <button class="primary" id="btn-scan-lib">重新扫描</button>
+        <span class="muted" id="lib-msg"></span>
+      </div>
+    </section>
+
+    <!-- ══════════ 设置 ══════════ -->
+    <section class="view" id="view-settings">
+      <div class="page-head">
+        <h2>设置</h2>
+        <p>改完点「保存」。所有配置存在 <code id="cfg-path"></code>，你也可以直接编辑那个文件。</p>
+      </div>
+      <div id="settings-form"></div>
+      <div class="savebar">
+        <button class="primary" id="btn-save">保存设置</button>
+        <button class="ghost-btn" id="btn-reload">重新载入</button>
+        <span id="save-msg"></span>
+      </div>
+    </section>
+
+    <!-- ══════════ 运行逻辑 ══════════ -->
+    <section class="view" id="view-logic">
+      <div class="page-head">
+        <h2>运行逻辑</h2>
+        <p>这个应用做了什么、依赖了哪些开源项目、每一步的原理。可以编辑，但一般不用动。</p>
+      </div>
+      <div id="logic-body"></div>
+      <div class="savebar">
+        <button class="primary" id="btn-save-logic">保存</button>
+        <span id="logic-msg"></span>
+      </div>
+    </section>
+
+    <!-- ══════════ 拦截清单 ══════════ -->
+    <section class="view" id="view-blocked">
+      <div class="page-head">
+        <h2>拦截清单</h2>
+        <p>这些曲目不会被下载。分两类：<b>平台无音源</b>，和<b>安全检查拦下的</b>。</p>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h3>当前清单</h3>
+          <button class="mini-btn" id="btn-reload-blocked">刷新</button>
+        </div>
+        <div id="blocked-body" class="blocked-list"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>说明</h3></div>
+        <p class="muted">
+          清单存在容器里的 <code>blocked.txt</code>。<b>无音源</b>是指酷狗确实没有无损以上的版本；
+          <b>安全检查</b>是指采样率等属性会伤害设备（例如 176.4kHz 在手机链路上会输出噪声）。
+        </p>
+      </div>
+    </section>
+
+    <!-- ══════════ 运行日志 ══════════ -->
+    <section class="view" id="view-runs">
+      <div class="page-head">
+        <h2>运行日志</h2>
+        <p>每次运行的完整记录，按时间倒序。点开看详情 —— 排错主要靠这里。</p>
+      </div>
+      <div class="runs-layout">
+        <div class="runs-list" id="runs-list"></div>
+        <div class="runs-detail">
+          <div class="card-head"><h3 id="run-title">选择左侧一条记录</h3></div>
+          <pre class="runs-content" id="run-content">（未选择）</pre>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
