@@ -391,3 +391,23 @@ body.mode-auto .step-run { display: none; }
   font-size: 12.5px; color: var(--warn);
   padding: 4px 9px; border-radius: 6px; background: #2a2213;
 }
+
+
+/* ═══════════ 手动导入面板 ═══════════ */
+.import-panel {
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+  padding: 14px 20px; margin-bottom: 18px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+}
+.import-head { flex: 1; min-width: 240px; }
+.import-head h2 { margin-bottom: 3px; }
+.import-head .muted { font-size: 13px; }
+.import-actions { display: flex; gap: 10px; flex: none; }
+.import-actions .ghost-btn {
+  border-color: var(--line2); background: var(--panel2);
+}
+.import-actions .ghost-btn:hover:not(:disabled) {
+  border-color: var(--accent); color: var(--fg);
+}

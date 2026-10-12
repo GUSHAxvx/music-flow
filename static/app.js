@@ -143,6 +143,32 @@ async function runStep(id) {
   });
 }
 
+/* 手动导入：弹出系统对话框选文件/文件夹，后端执行导入 */
+async function doImport(mode) {
+  $('#btn-import-files').disabled = true;
+  $('#btn-import-folder').disabled = true;
+  appendLog({ ts: '', level: 'head', message:
+    mode === 'folder' ? '── 导入文件夹：请在弹出的窗口中选择 ──'
+                      : '── 导入歌曲：请在弹出的窗口中选择 ──' });
+  try {
+    await fetch('/api/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode })
+    });
+  } catch (e) {
+    appendLog({ ts: '', level: 'error', message: '导入请求失败: ' + e });
+  } finally {
+    // 对话框是阻塞式的，这里留一点时间再恢复按钮
+    setTimeout(() => {
+      $('#btn-import-files').disabled = false;
+      $('#btn-import-folder').disabled = false;
+    }, 1500);
+  }
+}
+$('#btn-import-files').onclick = () => doImport('files');
+$('#btn-import-folder').onclick = () => doImport('folder');
+
 $('#btn-sync').onclick = runAuto;
 $('#btn-stop').onclick = async () => {
   await fetch('/api/stop', { method: 'POST' });
@@ -176,6 +202,9 @@ async function pollStatus() {
     $('#btn-sync').disabled = !!r.running;
     $('#btn-stop').disabled = !r.running;
     document.querySelectorAll('.step-run').forEach(b => { b.disabled = !!r.running; });
+    const busy = !!r.running;
+    const bf = $('#btn-import-files'), bd = $('#btn-import-folder');
+    if (bf && bd) { bf.disabled = busy; bd.disabled = busy; }
     if (r.results) {
       Object.entries(r.results).forEach(([k, v]) => {
         setStepState(k, v === 'ok' ? 'ok' : (v === 'warn' ? 'warn' : 'fail'));
@@ -250,6 +279,13 @@ const FIELDS = [
           { v: 8, label: '7.1 环绕（8ch）' },
         ]},
       { k: 'content_mismatch_blocklist', t: '尊重内容错误清单', d: '保留「平台给错内容」的曲目不再重复下载', type: 'bool' },
+    ]},
+  { grp: 'import', title: '导入 · 手动添加歌曲',
+    note: '把自己下载的歌曲加进曲库。导入后会走正常流程：放进同步文件夹 → 打标签 → 传给手机。',
+    items: [
+      { k: 'accept_lossy', t: '允许导入有损文件', d: '手动挑的文件通常是有意为之，' +
+          '所以默认允许。关闭后只接受无损及以上（按实测规格判断，不看扩展名）',
+        type: 'bool' },
     ]},
   { grp: 'sync', title: '同步 · 传到手机',
     note: 'Syncthing 的连接信息。一般不用改。',

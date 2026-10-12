@@ -48,6 +48,14 @@ DOCKER = r"C:\Program Files\Docker\Docker\resources\bin\docker.exe"
 FFPROBE = (r"C:\Users\Administrator\AppData\Local\Microsoft"
            r"\WinGet\Links\ffprobe.exe")
 PY = sys.executable
+PICKER = os.path.join(BASE, "scripts", "pick_files.ps1")
+
+# 手动导入模块（同目录）
+_imp = None
+try:
+    import import_songs as _imp            # noqa: N816
+except Exception:                          # noqa: BLE001
+    _imp = None
 
 # 曲库在容器内的挂载点（已确认 music-monitor 把 D:\go-music-dl\downloads
 # 挂在 /downloads）。
@@ -79,6 +87,12 @@ DEFAULT_CONFIG = {
         "block_channels": [],
         "block_reason_176400": "176.4kHz 在本机手机链路上会输出噪声，实测炸耳",
         "content_mismatch_blocklist": True,   # 尊重 blocked.txt 里的内容错误曲目
+    },
+    "import": {
+        "note": "手动导入歌曲时的规则",
+        # 手动导入默认允许有损：是你自己挑的文件，通常是有意为之。
+        # 自动下载那条路仍然默认只收无损（download.accept_lossy）。
+        "accept_lossy": True,
     },
     "sync": {
         "note": "同步到手机。device_id / api_key 是个人信息，请填自己的 —— 别提交进仓库。",
@@ -1182,6 +1196,53 @@ def save_logic(sections):
         json.dump(sections, fh, ensure_ascii=False, indent=2)
 
 
+# ══════════════════════════════════════════════════════════════
+#  手动导入
+# ══════════════════════════════════════════════════════════════
+def run_import(mode):
+    """mode: 'files' 选文件 | 'folder' 选文件夹
+
+    导入后走与自动下载同样的后续：拷进同步文件夹 → 打标签 → 触发同步扫描。
+    """
+    if RUNNER.running:
+        log("已有任务在跑，等它结束再导入", "warn")
+        return
+
+    cfg = load_config()
+    title = "导入歌曲（文件夹）" if mode == "folder" else "导入歌曲（文件）"
+    RECORDER.start(title)
+    log(f"===== {title} =====", "head")
+    BUS.publish("import_start", mode=mode)
+    try:
+        paths = _imp.pick(mode, PICKER)
+        if not paths:
+            log("未选择任何内容（或对话框被取消）", "warn")
+            return
+        for p in paths:
+            log(f"  选中: {p}")
+
+        stat = _imp.import_songs(
+            paths, cfg, FFPROBE, cfg["advanced"]["tag_files_py"],
+            log=lambda m: log(m, "out"))
+        if stat.get("ok"):
+            _imp.trigger_scan(cfg, log=lambda m: log(m, "info"))
+            log(f"✓ 导入完成，{stat['ok']} 首已进入同步文件夹", "ok")
+        else:
+            log("没有新增文件（全部跳过或失败）", "warn")
+        # 曲库统计缓存作废，下次打开「曲库」页会重扫
+        try:
+            p = os.path.join(BASE, "library_stats.json")
+            if os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
+    except Exception:
+        log("导入过程出错：\n" + traceback.format_exc(), "error")
+    finally:
+        RECORDER.close()
+        BUS.publish("import_end")
+
+
 def q_blocked():
     """读取容器里的 blocked 名单"""
     try:
@@ -1318,6 +1379,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if p == "/api/stop":
             RUNNER.stop()
+            return self._json({"ok": True})
+        if p == "/api/import":
+            mode = body.get("mode", "files")
+            if mode not in ("files", "folder"):
+                return self._json({"ok": False, "error": "mode 无效"}, 400)
+            if _imp is None:
+                return self._json({"ok": False, "error": "导入模块未加载"}, 500)
+            threading.Thread(target=run_import, args=(mode,),
+                             daemon=True).start()
             return self._json({"ok": True})
         if p == "/api/config":
             cfg = body.get("config")
