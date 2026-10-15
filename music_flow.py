@@ -432,6 +432,17 @@ def looks_like_error(line):
     return any(h in low for h in ERROR_HINTS)
 
 
+def _fmt_dur(seconds):
+    """把秒数写成一眼能看懂的样子（性能排查用）。"""
+    if seconds < 60:
+        return f"{seconds:.1f} 秒"
+    m, s = divmod(int(round(seconds)), 60)
+    if m < 60:
+        return f"{m} 分 {s} 秒"
+    h, m = divmod(m, 60)
+    return f"{h} 小时 {m} 分 {s} 秒"
+
+
 # 当前正在运行的子进程 + 停止信号。
 # 「停止」要真的能中断，而不是等当前步骤跑完 —— 否则用户只能干等。
 _CURRENT_PROC = None
@@ -1586,6 +1597,7 @@ class Runner:
         self.mode = None
         self.current = None
         self.results = {}          # step_id -> ok/warn/fail/skip/stopped
+        self.timings = {}          # step_id -> 这一步实际跑了多少秒
 
     def snapshot(self):
         # current_critical / current_warning 给前端的「停止」按钮用：
@@ -1601,6 +1613,7 @@ class Runner:
             "current_critical": bool(cur and cur.get("critical")),
             "current_warning": (cur or {}).get("stop_warning"),
             "results": dict(self.results),
+            "timings": dict(self.timings),
         }
 
     def run(self, mode, only=None):
@@ -1614,6 +1627,7 @@ class Runner:
             self.mode = mode
             if mode == "auto":
                 self.results = {}
+                self.timings = {}
 
         cfg = load_config()
         title = "省心模式（全流程）" if mode == "auto" else f"单步：{only}"
@@ -1642,6 +1656,7 @@ class Runner:
                 BUS.publish("step_start", step=st["id"], name=st["name"])
                 log(f"───── {st['name']}：{st['desc']} ─────", "head", st["id"])
                 step_aborted = False
+                t_step = time.monotonic()
                 try:
                     ok = st["fn"](cfg)
                 except StepAborted:
@@ -1660,12 +1675,14 @@ class Runner:
                     ok = False
 
                 if step_aborted:
+                    self.timings[st["id"]] = time.monotonic() - t_step
                     break
 
                 if ok:
                     self.results[st["id"]] = "ok"
                     BUS.publish("step_end", step=st["id"], ok=True)
-                    log(f"✓ {st['name']} 完成", "ok", st["id"])
+                    el = self._took(st, t_step)
+                    log(f"✓ {st['name']} 完成（用时 {el}）", "ok", st["id"])
                     continue
 
                 # 失败：软步骤（如手机没连上导致的同步失败）不算致命
@@ -1673,26 +1690,46 @@ class Runner:
                     self.results[st["id"]] = "warn"
                     BUS.publish("step_end", step=st["id"], ok=False, soft=True)
                     soft_fail.append(st["name"])
-                    log(f"⚠ {st['name']} 未完成（非致命，前面的工作已生效）",
+                    el = self._took(st, t_step)
+                    log(f"⚠ {st['name']} 未完成（非致命，前面的工作已生效，用时 {el}）",
                         "warn", st["id"])
                     continue
 
                 self.results[st["id"]] = "fail"
                 BUS.publish("step_end", step=st["id"], ok=False)
                 all_ok = False
-                log(f"✗ {st['name']} 失败", "error", st["id"])
+                el = self._took(st, t_step)
+                log(f"✗ {st['name']} 失败（用时 {el}）", "error", st["id"])
                 if mode == "auto":
                     log("自动模式：出错即停止，后续步骤不再执行", "warn")
                     break
 
             if soft_fail:
                 log(f"以下步骤需要你处理一下：{'、'.join(soft_fail)}", "warn")
+            if self.timings:
+                # 一轮跑完把各步骤耗时按从慢到快列一遍：下次觉得慢，
+                # 看这一行就知道该查哪一步，不用再拿时间戳做减法。
+                slow = sorted(self.timings.items(), key=lambda kv: -kv[1])
+                name_of = {s["id"]: s["name"] for s in PIPELINE}
+                parts = [f"{name_of.get(k, k)} {_fmt_dur(v)}" for k, v in slow]
+                log("各步骤耗时（从慢到快）：" + " ｜ ".join(parts), "info")
+                log(f"本轮合计 {_fmt_dur(sum(self.timings.values()))}", "info")
         except BaseException as exc:
             # 兜底：无论如何都要把状态复位，否则界面会永远卡在「运行中」
             log(f"运行器异常终止: {exc!r}\n{traceback.format_exc()}", "error")
             all_ok = False
         finally:
             self._finish(all_ok, stopped=stopped)
+
+    def _took(self, st, t_step):
+        """记下这一步跑了多久，返回给人看的字符串。
+
+        只做记时，不参与任何判断 —— 纯粹是为了「这一轮到底慢在哪一步」
+        能有一条可查的证据，不用再去日志里按时间戳减法。
+        """
+        el = time.monotonic() - t_step
+        self.timings[st["id"]] = el
+        return _fmt_dur(el)
 
     def _finish(self, ok, stopped=False):
         self.running = False

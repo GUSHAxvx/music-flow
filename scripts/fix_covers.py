@@ -826,11 +826,19 @@ def lyrics_from_lrclib(artist: str, title: str) -> tuple[str | None, str, str]:
     import urllib.parse as _up
     url = "https://lrclib.net/api/search?" + _up.urlencode(
         {"artist_name": artist, "track_name": title})
-    # LRCLIB 偶尔回 503（服务端忙）。它不限流、重试代价低，值得退避重试几次；
-    # 不重试就会白跑一次网易云，白白消耗那点很宝贵的额度。
+    # LRCLIB 偶尔回 429/503（服务端忙/限流）。撞上了值得「立刻再试一次」——
+    # 实测这一下成功率很高（12 次 429 里 10 次紧跟着就 200）。
+    #
+    # 但原来还排了第三次、要 sleep 6 秒，实测**纯属白等**：这一天的采样里，
+    # 凡是被重试救回来的都是「429,429,200」这种第二次就成的形态，6 秒那次
+    # 几乎从不发生在能救回来的样本上；而救不回来的（连续三个 429）多等 6 秒
+    # 也照样救不回来 —— 反倒是每首都要多等 6 秒。24 首采样里 11 首撞上，
+    # 光 time.sleep 就烧掉 46 秒（按全库 275 首外推约 8.8 分钟纯等待），
+    # 砍掉这一段之后同样的样本只剩 16 秒。
+    # 歌词真取不到还有网易云兜底，不会因为少等这 6 秒而丢歌词。
     rows = None
     last_exc = None
-    for attempt, delay in enumerate((0.0, 2.0, 6.0)):
+    for attempt, delay in enumerate((0.0, 2.0)):
         if delay:
             time.sleep(delay)
         try:
