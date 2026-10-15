@@ -138,21 +138,68 @@ def _load_tag_module(tag_py):
     return mod
 
 
+def _decode_console_bytes(raw):
+    """把子进程 stdout 的原始字节解码成路径文本。返回 (文本, 是否损坏)
+
+    为什么不能直接 `encoding="utf-8"`
+    ---------------------------------
+    PowerShell 5.1 往**管道**写字符串时用的是控制台输出编码（中文系统上
+    是 OEM 代码页 936/GBK），**不是** UTF-8。之前这里写死 `encoding="utf-8"`
+    配 `errors="replace"`，结果是：
+
+        E:\\音乐\\KugouMusic\\李润祺 - 茫.kgg        （磁盘上真实存在）
+        E:\\????\\KugouMusic\\?????? - ?.kgg        （程序实际拿到的）
+
+    每个中文字符变成 U+FFFD，路径当然不存在，文件被判成「没选中」——
+    而且因为 errors="replace" **不抛异常**，整条链路静默失败，日志只说
+    「展开为 0 个音频文件」，查不出原因。2026-10-15 用户导
+    `李润祺 - 茫.kgg` 失败就是这个 bug：纯 ASCII 文件名能过（两种编码
+    解码结果一样），一带中文就废。
+
+    现在按顺序试：UTF-8 → GBK。两个都行不通说明解码方式对不上，
+    此时才报「损坏」，交给调用方提示用户（而不是悄悄给个死路径）。
+    """
+    if not raw:
+        return "", False
+    for enc in ("utf-8", "gbk"):
+        try:
+            return raw.decode(enc), False
+        except UnicodeDecodeError:
+            continue
+    # 两种编码都解不出：退回替换式解码，并明确标记损坏
+    return raw.decode("gbk", errors="replace"), True
+
+
 def pick(mode, picker=None):
-    """弹出系统对话框，返回选中的路径列表（取消则返回空列表）"""
+    """弹出系统对话框，返回选中的路径列表（取消则返回空列表）
+
+    编码不可靠时**宁可一条都不返回**（外层会提示用户重选），也不要返回
+    一串乱码路径 —— 那种路径后面只会以「展开为 0 个音频文件」的形式
+    静默失败，比直接报错更难查。
+    """
     script = picker or PICKER
     if not os.path.exists(script):
         return []
     try:
+        # 不传 text/encoding：先拿原始字节，自己决定怎么解（见上）
         r = subprocess.run(
             ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-File", script, "-Mode", mode],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=600)
-        out = (r.stdout or "").strip()
-        return [l.strip() for l in out.splitlines() if l.strip()]
+            capture_output=True, timeout=600)
     except Exception:
         return []
+
+    raw = r.stdout or b""
+    if isinstance(raw, str):           # 万一将来被改成 text=True
+        raw = raw.encode("utf-8", errors="replace")
+    text, corrupt = _decode_console_bytes(raw)
+    if corrupt:
+        # 不返回乱码；把文件选择框的原话附上，方便定位
+        err = (r.stderr or b"").decode("gbk", errors="replace").strip()
+        print("⚠ 文件选择框的返回值无法解码（路径可能含非 ASCII 字符）"
+              + (f"：{err[:200]}" if err else ""), file=sys.stderr)
+        return []
+    return [l.strip() for l in text.splitlines() if l.strip()]
 
 
 def probe(path, ffprobe):
@@ -208,23 +255,70 @@ def quality_score(info):
         + (info.get("rate") or 0) * 1000
 
 
-def collect(paths, with_encrypted=False):
+def collect(paths, with_encrypted=False, diag=None):
     """把「文件或文件夹」的混合列表展开成音频文件列表
 
     with_encrypted=True 时把加密容器也算进来 —— 调用方会先把它们解码
     再进入正常导入流程。
+
+    diag 是**可选的**「为什么没收下它」记录本（一个 dict，键为原因、
+    值为文件列表）。传它进来，被跳过的每一项都会被记下原因。
+
+    为什么要有 diag（踩过的坑）
+    --------------------------
+    原来只有一句 `共选中 N 项，展开为 M 个音频文件`。一旦 M=0，用户看到
+    的只有「没有新增文件（全部跳过或失败）」——**完全不知道是路径不存在、
+    扩展名不认识，还是解码器没配**。2026-10-15 那次导入失败就是这样：
+    真实原因是路径编码坏了导致文件"不存在"，但日志里一个字都没提，
+    只能靠猜。所以这里规定：**任何一个没被收下的项，都必须留下原因。**
     """
     want = AUDIO_EXT + (ENCRYPTED_EXT if with_encrypted else ())
+
+    def _note(reason, p):
+        if diag is not None:
+            diag.setdefault(reason, []).append(p)
+
     out = []
     for p in paths:
+        if not os.path.exists(p):
+            # 最容易被忽略的一种：路径本身是坏的（编码错、盘符错、文件被移走）
+            _note("路径不存在", p)
+            continue
         if os.path.isfile(p):
-            if os.path.splitext(p)[1].lower() in want:
+            base = os.path.splitext(p)[1].lower()
+            if base in want:
                 out.append(p)
+                continue
+            # 扩展名不在名单里 —— 但内容可能是加密的（酷狗爱把加密文件
+            # 改名成 .flac/.mp3）。内容判据与 encrypted_files() 保持一致，
+            # 否则会出现「说它没被收下，又说它需要解码器」这种自相矛盾。
+            if base in (".flac", ".mp3"):
+                try:
+                    with open(p, "rb") as fh:
+                        head = fh.read(12)
+                except OSError:
+                    _note("读不出文件头", p)
+                    continue
+                if any(head.startswith(h) for h in _ENC_HEADERS):
+                    out.append(p)
+                    continue
+            # 是加密容器，但这次没带解码器进来（with_encrypted=False）。
+            # 单独记一类原因：这跟「格式不认识」是两回事，用户看到
+            # 「需要解码器」才知道该去配 music_decode_exe。
+            if base in ENCRYPTED_EXT:
+                _note("需要解码器", p)
+            else:
+                _note("扩展名不支持", p)
         elif os.path.isdir(p):
+            n_before = len(out)
             for root, _dirs, files in os.walk(p):
                 for f in sorted(files):
                     if os.path.splitext(f)[1].lower() in want:
                         out.append(os.path.join(root, f))
+            if len(out) == n_before:
+                _note("文件夹里没有音频文件", p)
+        else:
+            _note("既不是文件也不是文件夹", p)
     return out
 
 
@@ -262,16 +356,21 @@ def decode_encrypted(files, decoder, ffprobe, workdir, log=print):
         """
         before = set(os.listdir(outdir))
         if force_kgg:
-            probe = os.path.join(outdir, "_probe.kgg")
+            # 注意变量名别叫 probe —— 那会遮蔽外层模块级的 probe() 函数。
+            # 之前这里叫 probe，于是下面第 376 行的 `probe(...)` 被 Python
+            # 判成「用了尚未赋值的局部变量」，直接抛 UnboundLocalError，
+            # **整个导入流程崩掉**。所有加密音乐（.kgg/.ncm/.qmc…）都会踩到，
+            # 2026-10-14 23:23 那次导入失败的 traceback 就是它。
+            probe_copy = os.path.join(outdir, "_probe.kgg")
             try:
-                shutil.copy2(src, probe)
-                r = subprocess.run([decoder, "-o", outdir, probe],
+                shutil.copy2(src, probe_copy)
+                r = subprocess.run([decoder, "-o", outdir, probe_copy],
                                    capture_output=True, text=True,
                                    encoding="utf-8", errors="replace",
                                    timeout=1800)
             finally:
                 try:
-                    os.remove(probe)
+                    os.remove(probe_copy)
                 except OSError:
                     pass
         else:
@@ -281,8 +380,38 @@ def decode_encrypted(files, decoder, ffprobe, workdir, log=print):
         for f in sorted(set(os.listdir(outdir)) - before):
             info = probe(os.path.join(outdir, f), ffprobe)
             if info and info.get("dur"):
-                return f, (r.stdout or "") + (r.stderr or ""), r.returncode
+                return _fix_probe_name(f), \
+                    (r.stdout or "") + (r.stderr or ""), r.returncode
         return None, (r.stdout or "") + (r.stderr or ""), r.returncode
+
+    def _fix_probe_name(f):
+        """把「按 .kgg 重试」留下的 _probe.xxx 改回歌手 - 歌名.xxx
+
+        为什么必须改（2026-10-15 实测踩到）
+        ----------------------------------
+        force_kgg 那条路是把源文件复制成 _probe.kgg 再喂给解码器，而解码器
+        是**按输出名反推歌曲信息**的：输入叫 _probe.kgg，产出的音频就叫
+        _probe.flac，然后这个文件名被原样拷进曲库。
+        后果是整条链路全线认不出它：文件名里没有「歌手 - 歌名」，
+        打标签取不到歌手、封面与歌词查不到、手机上显示成一首无名的歌。
+        所以这里必须改回原名，让下游拿到的是正常文件名。
+
+        改不回去也不失败：名字难看总比把用户的歌丢掉好（返回原名继续走）。
+        """
+        if not f.startswith("_probe"):
+            return f
+        ext = os.path.splitext(f)[1]
+        want = os.path.splitext(os.path.basename(src))[0]
+        if not want:
+            return f
+        target = os.path.join(outdir, want + ext)
+        try:
+            if os.path.exists(target):
+                os.remove(target)
+            os.replace(os.path.join(outdir, f), target)
+            return want + ext
+        except OSError:
+            return f
 
     for i, src in enumerate(enc, 1):
         name = os.path.basename(src)
@@ -345,8 +474,28 @@ def import_songs(paths, cfg, ffprobe, tag_py, log=print, decoder=None):
     block_ch = set(cfg.get("guard", {}).get("block_channels") or [])
 
     os.makedirs(lib, exist_ok=True)
-    raw = collect(paths, with_encrypted=bool(decoder))
+    diag = {}
+    raw = collect(paths, with_encrypted=bool(decoder), diag=diag)
     log(f"共选中 {len(paths)} 项，展开为 {len(raw)} 个音频文件")
+
+    # 一个都没展开出来时，**逐项说清为什么**。以前这里只有一句
+    # 「没有新增文件」，用户拿着日志也查不出问题（见 collect() 的注释）。
+    if not raw and diag:
+        log("⚠ 选中的内容没有被识别为音频，逐项原因：")
+        for reason, items in diag.items():
+            for p in items[:10]:
+                log(f"    · [{reason}] {p}")
+            if len(items) > 10:
+                log(f"    · …另有 {len(items) - 10} 项同样是「{reason}」")
+    # 「识别到了加密音乐，但没配解码器」也要说出来 —— 否则用户只会看到
+    # 「展开为 0 个音频文件」，完全想不到是解码器路径没配。
+    if not raw and not decoder:
+        enc_all = encrypted_files(paths)
+        if enc_all:
+            log(f"⚠ 其中有 {len(enc_all)} 个是加密音乐容器，"
+                "但没配置解码器（设置里的 music_decode_exe），只能跳过")
+            for p in enc_all[:5]:
+                log(f"    · {p}")
 
     # ---- 0. 加密音乐先解码（无损还原，改的是容器不是音质）----
     decoded_dir = None

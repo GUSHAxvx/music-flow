@@ -532,6 +532,37 @@ UTF-8 编码的 `.bat` 里带中文，cmd 会按当前代码页解析成乱码�
 
 需要按段切分取值。
 
+### 11. 含中文的 `.ps1` 必须存成 UTF-8 **带 BOM**（否则导入按钮点了没反应）
+
+Windows PowerShell 5.1 读 `.ps1` 的规则是「有 BOM 按 BOM，**没 BOM 按系统 ANSI(CP936)**」。
+纯 ASCII 的脚本无所谓，但只要里面有中文字符串，丢了 BOM 就会连锁崩：
+
+```
+中文按 GBK 解读成乱码字节 → 某些字节恰好是 0x27(单引号) → 引号提前闭合
+→ 解析器报「字符串缺少终止符」→ 整个脚本解析失败，run 都不 run
+```
+
+最坑的是它**静默失败**：脚本 exit 0 且没有任何输出。2026-10-15 那次
+`pick_files.ps1` 丢了 BOM，用户点「导入歌曲」什么都不弹，
+日志里只有一句「未选择任何内容（或对话框被取消）」，极难定位。
+
+所以：**编辑这类脚本时用会保留 BOM 的方式写回**（很多工具/编辑器默认吃掉它），
+改完跑一次自检：
+
+```bash
+python scripts/check_ps1_encoding.py         # 只检查，有问题 exit 1
+python scripts/check_ps1_encoding.py --fix   # 顺手补回 BOM
+```
+
+它的规则就两条：含非 ASCII 的 `.ps1` 必须有 BOM；没有 BOM 的必须纯 ASCII。
+`scripts/pixel_stats.ps1` 是故意保持纯 ASCII 的（所以它免检）。
+
+同理，PowerShell 5.1 往管道写字符串用的是**控制台输出编码（中文系统上是 GBK）**，
+不是 UTF-8。`pick_files.ps1` 现在已经显式钉死
+`[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false`，
+Python 侧的 `import_songs._decode_console_bytes()` 也做了「UTF-8 坏了就回退 GBK」的兜底，
+两边任意一边单独坏掉都不会再丢字符。
+
 ---
 
 ## 依赖的开源项目
