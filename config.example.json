@@ -20,6 +20,21 @@
     "content_mismatch_blocklist": true
   },
 
+  "covers": {
+    "note": "补齐封面/歌词。确认过「网上确实没有」的会写进文件标签记下来（30 天内不再重复查），已在库里的不重查，整库扫描约 0.5 秒且不联网",
+    "enabled": true,
+    "lyrics": true,
+    "netease_lyrics": true,
+    "max_per_run": 60
+  },
+
+  "decode": {
+    "note": "解码加密音乐（ncm/qmc/kgm/vpr/kgg）。无损还原不是转码：里面包的是 flac 就出 flac。必须排在打标签和嵌封面之前 —— 加密文件没法写元数据",
+    "enabled": true,
+    "threads": 0,
+    "delete_source": true
+  },
+
   "sync": {
     "note": "同步到手机。device_id / api_key 属于个人信息，请填自己的。",
     "folder_id": "go-music-dl-downloads",
@@ -47,6 +62,8 @@
     "tag_files_py": "D:\\music-monitor\\tag_files.py",
     "check_integrity_py": "D:\\music-monitor\\check_integrity.py",
     "samplerate_guard_py": "D:\\music-monitor\\samplerate_guard_host.py",
-    "audit_quality_ps1": "D:\\music-monitor\\audit_quality.ps1"
+    "audit_quality_ps1": "D:\\music-monitor\\audit_quality.ps1",
+    "fix_covers_py": "D:\\music-flow\\scripts\\fix_covers.py",
+    "music_decode_exe": "D:\\music-decode\\build\\music_decode.exe"
   }
 }

@@ -168,6 +168,18 @@
   </main>
 </div>
 
+<!-- 停止确认：只在「中断会有代价」的步骤弹出 -->
+<div class="modal-mask" id="stop-modal">
+  <div class="modal-box">
+    <h3 id="stop-modal-title">确认停止？</h3>
+    <p class="modal-warn" id="stop-modal-body"></p>
+    <div class="modal-actions">
+      <button class="ghost-btn" id="stop-cancel">继续运行</button>
+      <button class="ghost-btn danger" id="stop-confirm">仍然停止</button>
+    </div>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

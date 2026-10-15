@@ -31,6 +31,101 @@ PICKER = os.path.join(BASE, "scripts", "pick_files.ps1")
 AUDIO_EXT = (".flac", ".mp3", ".m4a", ".ogg", ".wav", ".ape", ".wma", ".aac")
 # 无损容器（按扩展名初判，最终以 ffprobe 实测为准）
 LOSSLESS_EXT = (".flac", ".wav", ".ape", ".alac")
+# 加密音乐容器（网易云 ncm / QQ音乐 qmc / 酷狗 kgg·kgma·kgm / 酷我 vpr）。
+# 这些不是音频，是**加了密的容器**：必须先解码才能读规格、才能打标签、
+# 手机上的播放器也才认。所以导入流程里它们要先过一遍解码器。
+# 清单与解码器保持一致；另外还有一种「扩展名写成 .flac、内容却是加密的」
+# （酷狗干的），靠文件头识别，见 encrypted_files()。
+ENCRYPTED_EXT = (".ncm", ".qmc0", ".qmc3", ".qmcflac", ".qmcogg",
+                 ".kgm", ".kgma", ".kgg", ".kgtemp", ".vpr")
+# 酷狗/酷我加密文件的文件头。
+#
+# 为什么只比前 12 字节（踩过的坑）
+# ---------------------------------
+# 解码器源码里的 KGM 头是完整 16 字节，末 4 字节写死 `0f f9 91 e4`。
+# 但实测磁盘上的文件是 `0f ff 99 14`（35 个样本 35 个如此），源码那个
+# 常量一个都没对上 —— 说明这 4 字节是**跟文件走的数据**，不是固定魔数。
+# 照抄 16 字节的话，所有变体都会被判成「不是加密文件」而静默跳过，
+# 用户导 .kgma 失败就是这么来的。所以只认真正稳定的前 12 字节。
+_ENC_HEADERS = (
+    bytes([0x7c, 0xd5, 0x32, 0xeb, 0x86, 0x02, 0x7f, 0x4b,
+           0xa8, 0xaf, 0xa6, 0x8e]),                              # 酷狗 KGM 族
+    bytes([0x05, 0x28, 0xbc, 0x96, 0xe9, 0xe4, 0x5a, 0x43,
+           0x91, 0xaa, 0xbd, 0xd0]),                              # 酷我 VPR
+)
+# 酷狗这一族的扩展名 —— 它们内容同源，解码时可以互相借道，见
+# _decode_via_kgg()。
+KGM_FAMILY_EXT = (".kgg", ".kgma", ".kgm", ".kgtemp")
+
+# 纯 Python 的酷狗解密模块（scripts/kugou_kgm.py）。它按「头部 0x1C 起的
+# 16 字节逐文件密钥」真解，能还原外置解码器认不出的 .kgma/.kgm/.kgtemp。
+_KGM_MOD = None
+
+
+def _kgm_module():
+    """懒加载 scripts/kugou_kgm.py；不可用返回 None（不抛异常）。"""
+    global _KGM_MOD
+    if _KGM_MOD is None:
+        try:
+            if os.path.join(BASE, "scripts") not in sys.path:
+                sys.path.insert(0, os.path.join(BASE, "scripts"))
+            import kugou_kgm as _m            # noqa: N816
+            _KGM_MOD = _m
+        except Exception:                      # noqa: BLE001
+            _KGM_MOD = False
+    return _KGM_MOD or None
+
+
+def _decode_via_python(src, outdir):
+    """用内置酷狗解密模块解一次，成功返回产物路径，失败返回 None。
+
+    只吃 .kgma/.kgm/.kgtemp（密钥随文件走）。.kgg 的密钥在酷狗客户端本地
+    缓存里，本模块拿不到，can_decrypt() 会挡掉，仍交给 kgg-helper。
+    """
+    mod = _kgm_module()
+    if mod is None:
+        return None
+    try:
+        with open(src, "rb") as fh:
+            head = fh.read(64)
+    except OSError:
+        return None
+    if not mod.can_decrypt(head):
+        return None
+    try:
+        return mod.decrypt_file(src, outdir)
+    except Exception:                          # noqa: BLE001
+        return None
+
+
+def _starts_kgm(p):
+    """文件头是不是酷狗那一族（不管它叫什么名字）"""
+    try:
+        with open(p, "rb") as fh:
+            return fh.read(12).startswith(_ENC_HEADERS[0])
+    except OSError:
+        return False
+
+
+def encrypted_files(files):
+    """从文件列表里挑出真正需要解码的（扩展名 + 文件头两种判据）"""
+    out = []
+    for p in files:
+        ext = os.path.splitext(p)[1].lower()
+        if ext in ENCRYPTED_EXT:
+            out.append(p)
+            continue
+        if ext in (".flac", ".mp3"):
+            # 扩展名可能是假的（酷狗/酷我把加密文件改名成 .flac/.mp3），
+            # 所以再看一眼文件头
+            try:
+                with open(p, "rb") as fh:
+                    head = fh.read(12)
+            except OSError:
+                continue
+            if any(head.startswith(h) for h in _ENC_HEADERS):
+                out.append(p)
+    return out
 
 _ffprobe_cache = {}
 
@@ -113,31 +208,167 @@ def quality_score(info):
         + (info.get("rate") or 0) * 1000
 
 
-def collect(paths):
-    """把「文件或文件夹」的混合列表展开成音频文件列表"""
+def collect(paths, with_encrypted=False):
+    """把「文件或文件夹」的混合列表展开成音频文件列表
+
+    with_encrypted=True 时把加密容器也算进来 —— 调用方会先把它们解码
+    再进入正常导入流程。
+    """
+    want = AUDIO_EXT + (ENCRYPTED_EXT if with_encrypted else ())
     out = []
     for p in paths:
         if os.path.isfile(p):
-            if os.path.splitext(p)[1].lower() in AUDIO_EXT:
+            if os.path.splitext(p)[1].lower() in want:
                 out.append(p)
         elif os.path.isdir(p):
             for root, _dirs, files in os.walk(p):
                 for f in sorted(files):
-                    if os.path.splitext(f)[1].lower() in AUDIO_EXT:
+                    if os.path.splitext(f)[1].lower() in want:
                         out.append(os.path.join(root, f))
     return out
 
 
-def import_songs(paths, cfg, ffprobe, tag_py, log=print):
-    """执行导入。返回统计 dict"""
+def decode_encrypted(files, decoder, ffprobe, workdir, log=print):
+    """把加密音乐解码成普通 flac/mp3，返回 (可导入文件列表, 待清理目录)
+
+    为什么手动导入也要走这一步
+    --------------------------
+    你手动挑的文件很可能是客户端下下来的 .ncm/.qmc/.kgm。这类文件用
+    ffprobe 读不出格式与时长，直接进导入流程会被判成「读不出规格」而失败。
+    所以先做一次**无损还原**（不是转码：ncm 里包 flac 就出 flac，包 mp3
+    就出 mp3，字节一致），再走后续的校验 / 去重 / 打标签。
+
+    只解码确认过是加密容器的文件；普通 flac/mp3 原样返回，一个字节都不动。
+    """
+    enc = encrypted_files(files)
+    plain = [f for f in files if f not in enc]
+    if not enc:
+        return plain, None
+    if not decoder or not os.path.exists(decoder):
+        log(f"⚠ 有 {len(enc)} 个加密音乐，但找不到解码器（{decoder}），跳过这些文件")
+        return plain, None
+
+    outdir = os.path.join(workdir, "decoded")
+    os.makedirs(outdir, exist_ok=True)
+    log(f"检测到 {len(enc)} 个加密音乐，先解码（无损还原，不是转码）")
+
+    def _attempt(src, path, force_kgg=False):
+        """跑一次解码，返回 (能当音频读的产物文件名, 输出文本, 退出码)
+
+        判成功**只看产物能不能当音频读**，不看退出码。
+        为什么：解码器在「ncm 里没嵌封面」时会打印 [Warn] 并让退出码变 1
+        （main.cpp 里 success 还带着警告），但音频其实已经完整还原了。
+        光看退出码会把这类正常文件判成失败，等于白白丢掉用户的歌。
+        """
+        before = set(os.listdir(outdir))
+        if force_kgg:
+            probe = os.path.join(outdir, "_probe.kgg")
+            try:
+                shutil.copy2(src, probe)
+                r = subprocess.run([decoder, "-o", outdir, probe],
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace",
+                                   timeout=1800)
+            finally:
+                try:
+                    os.remove(probe)
+                except OSError:
+                    pass
+        else:
+            r = subprocess.run([decoder, "-o", outdir, path],
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=1800)
+        for f in sorted(set(os.listdir(outdir)) - before):
+            info = probe(os.path.join(outdir, f), ffprobe)
+            if info and info.get("dur"):
+                return f, (r.stdout or "") + (r.stderr or ""), r.returncode
+        return None, (r.stdout or "") + (r.stderr or ""), r.returncode
+
+    for i, src in enumerate(enc, 1):
+        name = os.path.basename(src)
+
+        # 顺序：先内置（唯一能真解 .kgma/.kgm/.kgtemp 的路），再外置
+        # （管 .ncm/.qmc*/.kgg）。外置解码器在酷狗那一族上只会「静默跳过」
+        # 或「报成功但产出乱码」，所以让它排后面。
+        good, out_text, rc = None, "", 0
+        py_got = _decode_via_python(src, outdir)
+        if py_got and os.path.exists(py_got):
+            info = probe(py_got, ffprobe)
+            if info and info.get("dur"):
+                good = os.path.basename(py_got)
+                log(f"  [{i}/{len(enc)}] ✓ 已解码（内置酷狗解密）: {name} -> {good}")
+                plain.append(py_got)
+                continue
+
+        good, out_text, rc = _attempt(src, src)
+
+        # 第一遍没成，且这是酷狗那一族的，就换名字再试一遍。
+        # 原因见 _decode_via_kgg()：解码器按扩展名分流，而酷狗换过一次
+        # 密钥方案之后，KGM 那条路认不出新文件头了。
+        if good is None and (os.path.splitext(src)[1].lower() in KGM_FAMILY_EXT
+                             or _starts_kgm(src)):
+            good, out_text2, rc2 = _attempt(src, src, force_kgg=True)
+            if good is not None:
+                out_text, rc = out_text2, rc2
+                log("        按 .kgg 路径重试成功（酷狗换过密钥方案，"
+                    "按原名会被判成不支持）")
+
+        if good is None:
+            log(f"  [{i}/{len(enc)}] ✗ 解码失败，跳过: {name}"
+                + (f"（退出码 {rc}）" if rc else ""))
+            for line in [x for x in out_text.splitlines() if x.strip()][-4:]:
+                log(f"        {line}")
+            continue
+        if rc != 0:
+            # 有产物但退出码非 0：多半只是「没封面」这类警告，记一笔就好
+            warn = [x for x in out_text.splitlines() if "Warn" in x or "警告" in x]
+            if warn:
+                log(f"        （解码器提示：{warn[0].strip()}）")
+        log(f"  [{i}/{len(enc)}] ✓ 已解码: {name} -> {good}")
+        # 只把**确认是音频的那一个**加进去 —— 解码失败时留下的 .bin 乱码
+        # 不能跟着混进导入列表。
+        plain.append(os.path.join(outdir, good))
+
+    return plain, outdir
+
+
+def import_songs(paths, cfg, ffprobe, tag_py, log=print, decoder=None):
+    """执行导入。返回统计 dict
+
+    decoder 是 music_decode.exe 的路径（可选）。给了它，选中的加密音乐
+    （ncm/qmc/kgm/vpr/kgg）会先**解码成普通 flac/mp3** 再走后面的校验；
+    不给就只收普通音频。
+    """
     lib = cfg["sync"]["downloads_dir"]
     accept_lossy = bool(cfg.get("import", {}).get("accept_lossy", True))
     block_rates = set(cfg.get("guard", {}).get("block_sample_rates") or [])
     block_ch = set(cfg.get("guard", {}).get("block_channels") or [])
 
     os.makedirs(lib, exist_ok=True)
-    files = collect(paths)
-    log(f"共选中 {len(paths)} 项，展开为 {len(files)} 个音频文件")
+    raw = collect(paths, with_encrypted=bool(decoder))
+    log(f"共选中 {len(paths)} 项，展开为 {len(raw)} 个音频文件")
+
+    # ---- 0. 加密音乐先解码（无损还原，改的是容器不是音质）----
+    decoded_dir = None
+    if decoder:
+        workdir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "_import_tmp")
+        files, decoded_dir = decode_encrypted(raw, decoder, ffprobe, workdir, log)
+    else:
+        files = raw
+
+    try:
+        return _import_plain(files, lib, cfg, ffprobe, tag_py,
+                             accept_lossy, block_rates, block_ch, log)
+    finally:
+        # 解码出来的临时副本用完就删 —— 真正入库的是拷进同步文件夹那份
+        if decoded_dir:
+            shutil.rmtree(os.path.dirname(decoded_dir), ignore_errors=True)
+
+
+def _import_plain(files, lib, cfg, ffprobe, tag_py,
+                  accept_lossy, block_rates, block_ch, log=print):
+    """导入流程本体（文件都已经是普通音频了）"""
     if not files:
         return {"total": 0, "ok": 0, "skip": 0, "fail": 0}
 

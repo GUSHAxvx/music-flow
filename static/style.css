@@ -421,3 +421,39 @@ body.mode-auto .step-run { display: none; }
 .import-btn:hover:not(:disabled) {
   background: var(--accent); border-color: var(--accent); color: #fff;
 }
+
+/* ══════════ 停止确认弹窗 ══════════
+   只在「中断会有代价」的步骤出现。普通步骤（启动类）点停止直接停，不打扰。 */
+.modal-mask {
+  display: none; position: fixed; inset: 0; z-index: 200;
+  background: rgba(5, 8, 12, .72);
+  align-items: center; justify-content: center; padding: 24px;
+}
+.modal-mask.show { display: flex; }
+.modal-box {
+  max-width: 520px; width: 100%;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 22px 24px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .55);
+}
+.modal-box h3 {
+  margin: 0 0 12px; font-size: 16px; font-weight: 600; color: var(--fg);
+}
+.modal-warn {
+  margin: 0 0 20px; font-size: 13.5px; line-height: 1.75; color: var(--fg-dim);
+  border-left: 3px solid var(--warn); padding-left: 12px;
+}
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.modal-actions .ghost-btn.danger {
+  border-color: var(--err); color: var(--err);
+}
+.modal-actions .ghost-btn.danger:hover {
+  background: var(--err); border-color: var(--err); color: #fff;
+}
+/* 步骤卡片上「中断有代价」的小标（配合停止确认弹窗） */
+.step-tag {
+  font-size: 11px; line-height: 1; padding: 3px 6px; border-radius: 4px;
+  color: var(--warn); border: 1px solid rgba(210, 153, 34, .45);
+  background: rgba(210, 153, 34, .12); white-space: nowrap;
+  margin-left: 8px; margin-right: auto; cursor: help;
+}

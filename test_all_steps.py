@@ -19,10 +19,13 @@ STEPS = [
     ("containers", "② 启动容器",          90),
     ("syncthing",  "③ 启动 Syncthing",    90),
     ("download",   "④ 检查并下载新收藏", 900),
-    ("maintain",   "⑤ 落盘与整理",      900),
-    ("verify",     "⑥ 安全检查",        300),
-    ("integrity",  "⑦ 曲库体检",        300),
-    ("sync",       "⑧ 同步到手机",      300),
+    ("decode",     "⑤ 解码加密音乐",     900),
+    ("maintain",   "⑥ 落盘与整理",       900),
+    ("covers",     "⑦ 封面与歌词",       900),
+    ("coverback",  "⑧ 回写暂存",         300),
+    ("verify",     "⑨ 安全检查",         300),
+    ("integrity",  "⑩ 曲库体检",         300),
+    ("sync",       "⑪ 同步到手机",       300),
 ]
 
 ONLY = sys.argv[1:] if len(sys.argv) > 1 else None

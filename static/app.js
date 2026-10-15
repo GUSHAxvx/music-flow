@@ -68,6 +68,12 @@ function renderSteps() {
 
     const top = el('div', 'step-top');
     top.append(el('span', 'step-name', s.name));
+    // 打断会有代价的步骤标一下，让用户点停止前心里有数
+    if (s.critical) {
+      const tag = el('span', 'step-tag', '中断有代价');
+      tag.title = s.stop_warning || '这一步跑到一半被停止会有影响，按停止时会先弹窗说明';
+      top.append(tag);
+    }
     top.append(el('span', 'step-state', '待运行'));
     card.append(top);
     card.append(el('div', 'step-desc', s.desc));
@@ -170,8 +176,35 @@ $('#btn-import-files').onclick = () => doImport('files');
 $('#btn-import-folder').onclick = () => doImport('folder');
 
 $('#btn-sync').onclick = runAuto;
-$('#btn-stop').onclick = async () => {
+
+/* ══════════ 停止（关键步骤先问一次） ══════════
+   背景：有些步骤中途停下是有代价的（落盘没跑完、暂存只回写了一半……）。
+   以前点一下就停，用户看不到代价。现在如果当前步骤标了 critical，
+   就把这一步的具体影响摆出来问一次；普通步骤（启动类）照旧直接停。 */
+function closeStopModal() {
+  $('#stop-modal').classList.remove('show');
+}
+
+async function doStop() {
+  closeStopModal();
   await fetch('/api/stop', { method: 'POST' });
+}
+
+$('#btn-stop').onclick = () => {
+  const r = (STATUS && STATUS.runner) || {};
+  const warn = r.current_warning;
+  if (r.running && r.current_critical && warn) {
+    $('#stop-modal-title').textContent = `停止「${r.current_name || '当前步骤'}」？`;
+    $('#stop-modal-body').textContent = warn;
+    $('#stop-modal').classList.add('show');
+    return;
+  }
+  doStop();
+};
+$('#stop-confirm').onclick = doStop;
+$('#stop-cancel').onclick = closeStopModal;
+$('#stop-modal').onclick = (e) => {
+  if (e.target.id === 'stop-modal') closeStopModal();
 };
 
 /* ══════════ 状态轮询 ══════════ */
@@ -207,7 +240,12 @@ async function pollStatus() {
       .forEach(b => { b.disabled = busy; });
     if (r.results) {
       Object.entries(r.results).forEach(([k, v]) => {
-        setStepState(k, v === 'ok' ? 'ok' : (v === 'warn' ? 'warn' : 'fail'));
+        // 中途被用户停下的步骤记 stopped：既不是成功也不是失败，
+        // 卡片上要写清楚「已停止」，不能让它看起来像出故障了。
+        if (v === 'stopped') setStepState(k, 'warn', '已停止');
+        else if (v === 'ok') setStepState(k, 'ok');
+        else if (v === 'warn') setStepState(k, 'warn');
+        else setStepState(k, 'fail');
       });
     }
     if (r.current) setStepState(r.current, 'running');
