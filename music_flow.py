@@ -1184,6 +1184,17 @@ def s_integrity(cfg):
         log("找不到完整性检查脚本，跳过", "warn")
         return True
     ok, _ = run_cmd([PY, chk], step="integrity", env=step_env())
+
+    # 2026-10-18 加：顺带查「同一歌手撞名」和「同一首音频存了两份」。
+    # 只报告、不修改 —— 删文件或改标签都不该在体检步骤里静默发生。
+    # 要修复请手动跑：
+    #   python scripts/library_guard.py --fix-tags
+    #   python scripts/library_guard.py --fix-dup
+    guard = os.path.join(BASE, "scripts", "library_guard.py")
+    if os.path.exists(guard):
+        gok, _ = run_cmd([PY, guard], step="integrity", env=step_env())
+        if not gok:
+            log("曲库守护（撞名/重复副本）检查没跑通，不影响本轮其它步骤", "warn")
     return ok
 
 

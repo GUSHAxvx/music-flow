@@ -1476,6 +1476,19 @@ def write_into(path: str, cover: bytes | None, lyrics: str | None, artist: str,
     副本都不产生。两条兜底都在，判定错任何一边也只会退化成「多写一次」，
     不会漏写。
     """
+    # 2026-10-18：**文件里已经有歌手/歌名时，绝不覆盖**。
+    #
+    # 上面调用处写的是
+    #     artist, title = pic_name or lrc_name or cands[0]
+    # 也就是「换一套名字才搜到封面/歌词」时，会把**那一套名字**写回文件标签。
+    # 这正是 `SawanoHiroyuki[nZk]、Tielle - アメイジングツリーズ.flac`
+    # 被改成 `Amazing Trees`、以及个别文件被改成同一歌手**另一首歌**名字的
+    # 根源。补封面和歌词根本不需要靠改歌名来生效，所以这里把已有值兜住：
+    # 只有原本是空的标签才会被填上。
+    cur_a, cur_t = tag_names(path)
+    artist = cur_a or artist
+    title = cur_t or title
+
     if not tags_need_write(path, cover, lyrics, artist, title):
         return False
     d = os.path.dirname(os.path.abspath(path))
