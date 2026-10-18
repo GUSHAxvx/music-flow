@@ -150,20 +150,22 @@ async function runStep(id) {
 }
 
 /* 手动导入：弹出系统对话框选文件/文件夹，后端执行导入
-   勾了「替换同名旧文件」就是替换模式：同名即替换，不看规格高低 */
+   勾了「替换同名旧文件」就是替换模式：同名即替换，不看规格高低
+   勾了「导入后删除原始加密文件」：加密音乐入库成功后删掉 .kgg/.ncm 等源文件 */
 async function doImport(mode) {
   const replace = !!($('#chk-import-replace') || {}).checked;
+  const deleteSrc = !!($('#chk-import-delete-src') || {}).checked;
   document.querySelectorAll('#btn-import-files, #btn-import-folder, .import-btn')
     .forEach(b => { b.disabled = true; });
   appendLog({ ts: '', level: 'head', message:
     `── ${replace ? '替换导入' : '导入'}${mode === 'folder' ? '文件夹' : '歌曲'}：`
-    + (replace ? '同名的旧文件会被替换并删除 ──'
-               : '请在弹出的窗口中选择 ──') });
+    + (replace ? '同名的旧文件会被替换并删除' : '请在弹出的窗口中选择')
+    + (deleteSrc ? '，加密源文件入库后删除' : '') + ' ──' });
   try {
     await fetch('/api/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, replace })
+      body: JSON.stringify({ mode, replace, delete_src: deleteSrc })
     });
   } catch (e) {
     appendLog({ ts: '', level: 'error', message: '导入请求失败: ' + e });

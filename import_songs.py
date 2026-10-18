@@ -339,11 +339,14 @@ def decode_encrypted(files, decoder, ffprobe, workdir, log=print):
     """
     enc = encrypted_files(files)
     plain = [f for f in files if f not in enc]
+    # 解码产物 -> 原始加密文件 的对应关系。
+    # 「解码完删掉源文件」这个选项要靠它，否则根本不知道删哪一个。
+    src_map = {}
     if not enc:
-        return plain, None
+        return plain, None, {}
     if not decoder or not os.path.exists(decoder):
         log(f"⚠ 有 {len(enc)} 个加密音乐，但找不到解码器（{decoder}），跳过这些文件")
-        return plain, None
+        return plain, None, {}
 
     outdir = os.path.join(workdir, "decoded")
     os.makedirs(outdir, exist_ok=True)
@@ -430,6 +433,7 @@ def decode_encrypted(files, decoder, ffprobe, workdir, log=print):
                 good = os.path.basename(py_got)
                 log(f"  [{i}/{len(enc)}] ✓ 已解码（内置酷狗解密）: {name} -> {good}")
                 plain.append(py_got)
+                src_map[os.path.abspath(py_got)] = src
                 continue
 
         good, out_text, rc = _attempt(src, src)
@@ -459,13 +463,15 @@ def decode_encrypted(files, decoder, ffprobe, workdir, log=print):
         log(f"  [{i}/{len(enc)}] ✓ 已解码: {name} -> {good}")
         # 只把**确认是音频的那一个**加进去 —— 解码失败时留下的 .bin 乱码
         # 不能跟着混进导入列表。
-        plain.append(os.path.join(outdir, good))
+        decoded_path = os.path.join(outdir, good)
+        plain.append(decoded_path)
+        src_map[os.path.abspath(decoded_path)] = src
 
-    return plain, outdir
+    return plain, outdir, src_map
 
 
 def import_songs(paths, cfg, ffprobe, tag_py, log=print, decoder=None,
-                 replace=False):
+                 replace=False, delete_src=False):
     """执行导入。返回统计 dict
 
     decoder 是 music_decode.exe 的路径（可选）。给了它，选中的加密音乐
@@ -474,6 +480,9 @@ def import_songs(paths, cfg, ffprobe, tag_py, log=print, decoder=None,
 
     replace=True 进入**替换模式**：曲库里同名的旧文件会被这份替换并删除，
     不看规格高低（用于「自动下载下错了歌」时手工纠正）。
+
+    delete_src=True 时，加密音乐**成功入库之后**会把它解码前的原始文件删掉
+    （省空间，也让源文件夹一眼能看出哪些已经导过）。
     """
     lib = cfg["sync"]["downloads_dir"]
     accept_lossy = bool(cfg.get("import", {}).get("accept_lossy", True))
@@ -506,17 +515,20 @@ def import_songs(paths, cfg, ffprobe, tag_py, log=print, decoder=None,
 
     # ---- 0. 加密音乐先解码（无损还原，改的是容器不是音质）----
     decoded_dir = None
+    src_map = {}
     if decoder:
         workdir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "_import_tmp")
-        files, decoded_dir = decode_encrypted(raw, decoder, ffprobe, workdir, log)
+        files, decoded_dir, src_map = decode_encrypted(raw, decoder, ffprobe,
+                                                       workdir, log)
     else:
         files = raw
 
     try:
         return _import_plain(files, lib, cfg, ffprobe, tag_py,
                              accept_lossy, block_rates, block_ch, log,
-                             replace=replace)
+                             replace=replace, src_map=src_map,
+                             delete_src=delete_src)
     finally:
         # 解码出来的临时副本用完就删 —— 真正入库的是拷进同步文件夹那份
         if decoded_dir:
@@ -594,15 +606,19 @@ def _replace_retry(tmp, dst, attempts=6, delay=0.8):
 
 def _import_plain(files, lib, cfg, ffprobe, tag_py,
                   accept_lossy, block_rates, block_ch, log=print,
-                  replace=False):
+                  replace=False, src_map=None, delete_src=False):
     """导入流程本体（文件都已经是普通音频了）
 
     replace=True 时进入**替换模式**：同名即替换，不看规格高低，
     并把曲库里同名的其它旧文件一并删掉。
+
+    delete_src=True 时，凡是 src_map 里记着「这是从哪个加密文件解码来的」，
+    在**成功入库之后**就把那个原始文件删掉。普通音频不在 src_map 里，
+    永远不会被删。
     """
     if not files:
         return {"total": 0, "ok": 0, "skip": 0, "fail": 0,
-                "tagged": 0, "replaced": 0, "imported": []}
+                "tagged": 0, "replaced": 0, "src_removed": 0, "imported": []}
 
     tagmod = None
     try:
@@ -611,7 +627,33 @@ def _import_plain(files, lib, cfg, ffprobe, tag_py,
         log(f"⚠ 打标签模块加载失败（将跳过打标签）: {exc}", )
 
     stat = {"total": len(files), "ok": 0, "skip": 0, "fail": 0, "tagged": 0,
-            "replaced": 0, "imported": []}
+            "replaced": 0, "src_removed": 0, "imported": []}
+
+    def _drop_source(decoded_path, dst_path=""):
+        """删掉解码前的原文件。
+
+        三个硬约束：
+          * 只删 src_map 里登记过的（= 确实是这次从它解码出来的），
+            普通 flac/mp3 永远不会被这个选项碰到；
+          * 必须等新文件真的落盘之后才调用（失败就留着，重来还有源）；
+          * 删不掉不算失败 —— Syncthing 或播放器可能正占用它。
+        """
+        if not delete_src or not src_map:
+            return
+        orig = src_map.get(os.path.abspath(decoded_path))
+        if not orig:
+            return
+        if dst_path and os.path.abspath(orig) == os.path.abspath(dst_path):
+            return
+        try:
+            if not os.path.exists(orig):
+                return
+            os.remove(orig)
+            stat["src_removed"] += 1
+            log(f"      🗑 已删除解码前的原文件: {os.path.basename(orig)}")
+        except OSError as exc:
+            log(f"      ⚠ 原文件删不掉（不影响已导入的歌）: "
+                f"{os.path.basename(orig)}（{exc}）")
     for i, src in enumerate(files, 1):
         name = os.path.basename(src)
         stem = os.path.splitext(name)[0]
@@ -667,11 +709,13 @@ def _import_plain(files, lib, cfg, ffprobe, tag_py,
                 same = os.path.getsize(src) == os.path.getsize(dst)
                 if same:
                     log(f"  [{i}/{len(files)}] ⊘ 已存在且大小相同: {name}")
+                    _drop_source(src)          # 既然库里已经有了，源文件就没用了
                     stat["skip"] += 1
                     continue
                 old = probe(dst, ffprobe)
                 if quality_score(old) >= quality_score(info):
                     log(f"  [{i}/{len(files)}] ⊘ 已存在且规格不低于导入版: {name}")
+                    _drop_source(src)          # 同上：这份已经导过了
                     stat["skip"] += 1
                     continue
                 log(f"  [{i}/{len(files)}] ↑ 已存在但规格更低，替换: {name}")
@@ -721,10 +765,16 @@ def _import_plain(files, lib, cfg, ffprobe, tag_py,
             except Exception as exc:      # noqa: BLE001
                 log(f"      标签写入失败: {exc}")
 
+        # ---- 6. 删掉解码前的原文件（可选，默认关）----
+        # 放在最后：新文件已落盘、标签已写，才动源文件。
+        _drop_source(src, dst)
+
     log("")
     log(f"导入完成：成功 {stat['ok']}，跳过 {stat['skip']}，失败 {stat['fail']}"
         + (f"，已写标签 {stat['tagged']}" if stat["tagged"] else "")
-        + (f"，替换同名旧文件 {stat['replaced']} 个" if stat["replaced"] else ""))
+        + (f"，替换同名旧文件 {stat['replaced']} 个" if stat["replaced"] else "")
+        + (f"，已删除解码前的源文件 {stat['src_removed']} 个"
+           if stat["src_removed"] else ""))
     return stat
 
 

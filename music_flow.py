@@ -2163,11 +2163,14 @@ def _drop_staging_same_name(stems, log=print):
     return gone
 
 
-def run_import(mode, replace=False):
+def run_import(mode, replace=False, delete_src=False):
     """mode: 'files' 选文件 | 'folder' 选文件夹
 
     replace=True 是**替换模式**：曲库里同名的旧文件会被这次导入的这份
     替换并删除，不看规格高低。用于「自动下载下错了歌、手工换一份」的场景。
+
+    delete_src=True 时，加密音乐（.kgg/.ncm/.qmc…）成功入库后会把它
+    解码前的原始文件删掉 —— 省空间，也让源文件夹一眼能看出哪些已经导过。
 
     导入后走与自动下载同样的后续：拷进同步文件夹 → 打标签 → 触发同步扫描。
     """
@@ -2182,6 +2185,8 @@ def run_import(mode, replace=False):
     log(f"===== {title} =====", "head")
     if replace:
         log("【替换模式】曲库里同名的旧文件会被这份替换并删除，不看规格高低", "info")
+    if delete_src:
+        log("【清理源文件】加密音乐成功入库后，会删掉解码前的原始文件", "info")
     BUS.publish("import_start", mode=mode)
     try:
         paths = _imp.pick(mode, PICKER)
@@ -2195,7 +2200,7 @@ def run_import(mode, replace=False):
             paths, cfg, FFPROBE, cfg["advanced"]["tag_files_py"],
             log=lambda m: log(m, "out"),
             decoder=cfg["advanced"].get("music_decode_exe"),
-            replace=replace)
+            replace=replace, delete_src=delete_src)
         if stat.get("ok"):
             # 替换模式：先把暂存里的同名旧副本清掉，再跑收尾。
             # 顺序不能反 —— finish_imported 里 ⑥落盘是从暂存往曲库拷的，
@@ -2377,13 +2382,16 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/import":
             mode = body.get("mode", "files")
             replace = bool(body.get("replace"))
+            delete_src = bool(body.get("delete_src"))
             if mode not in ("files", "folder"):
                 return self._json({"ok": False, "error": "mode 无效"}, 400)
             if _imp is None:
                 return self._json({"ok": False, "error": "导入模块未加载"}, 500)
-            threading.Thread(target=run_import, args=(mode, replace),
+            threading.Thread(target=run_import,
+                             args=(mode, replace, delete_src),
                              daemon=True).start()
-            return self._json({"ok": True, "replace": replace})
+            return self._json({"ok": True, "replace": replace,
+                               "delete_src": delete_src})
         if p == "/api/config":
             cfg = body.get("config")
             if not isinstance(cfg, dict):
