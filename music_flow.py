@@ -2130,8 +2130,44 @@ def finish_imported(cfg):
                 + traceback.format_exc(), "warn")
 
 
-def run_import(mode):
+def _drop_staging_same_name(stems, log=print):
+    """替换模式：把暂存目录里同名的旧副本也删掉。
+
+    为什么必须删
+    ------------
+    `hires_staging` / `_staging` 是 ⑥落盘的数据源。只在曲库里替换的话，
+    下一轮 ⑥ 会拿暂存里那份**旧的错歌**再落盘一次，替换成果当场被冲掉，
+    用户看到的就是「刚换完，一跑流程又变回错的」。
+    """
+    want = {_imp._norm_stem(s) for s in stems if s}
+    if not want:
+        return 0
+    gone = 0
+    for d in (HIRES_STAGING, LOCAL_STAGING):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for fn in names:
+            base, e = os.path.splitext(fn)
+            if e.lower() not in _imp.AUDIO_EXT:
+                continue
+            if _imp._norm_stem(base) not in want:
+                continue
+            try:
+                os.remove(os.path.join(d, fn))
+                gone += 1
+                log(f"  已删除暂存里的同名旧副本: {fn}")
+            except OSError as exc:
+                log(f"  ⚠ 暂存旧副本删不掉: {fn}（{exc}）")
+    return gone
+
+
+def run_import(mode, replace=False):
     """mode: 'files' 选文件 | 'folder' 选文件夹
+
+    replace=True 是**替换模式**：曲库里同名的旧文件会被这次导入的这份
+    替换并删除，不看规格高低。用于「自动下载下错了歌、手工换一份」的场景。
 
     导入后走与自动下载同样的后续：拷进同步文件夹 → 打标签 → 触发同步扫描。
     """
@@ -2140,9 +2176,12 @@ def run_import(mode):
         return
 
     cfg = load_config()
-    title = "导入歌曲（文件夹）" if mode == "folder" else "导入歌曲（文件）"
+    title = (("替换导入" if replace else "导入歌曲")
+             + ("（文件夹）" if mode == "folder" else "（文件）"))
     RECORDER.start(title)
     log(f"===== {title} =====", "head")
+    if replace:
+        log("【替换模式】曲库里同名的旧文件会被这份替换并删除，不看规格高低", "info")
     BUS.publish("import_start", mode=mode)
     try:
         paths = _imp.pick(mode, PICKER)
@@ -2155,8 +2194,16 @@ def run_import(mode):
         stat = _imp.import_songs(
             paths, cfg, FFPROBE, cfg["advanced"]["tag_files_py"],
             log=lambda m: log(m, "out"),
-            decoder=cfg["advanced"].get("music_decode_exe"))
+            decoder=cfg["advanced"].get("music_decode_exe"),
+            replace=replace)
         if stat.get("ok"):
+            # 替换模式：先把暂存里的同名旧副本清掉，再跑收尾。
+            # 顺序不能反 —— finish_imported 里 ⑥落盘是从暂存往曲库拷的，
+            # 暂存要是还留着旧歌，落盘会把它重新写回曲库。
+            if replace and stat.get("imported"):
+                n = _drop_staging_same_name(
+                    stat["imported"], log=lambda m: log(m, "out"))
+                log(f"  暂存目录清理：{n} 个同名旧副本", "info")
             # 先做收尾处理，**最后**才通知 Syncthing 扫描（2026-10-15 改）
             # ------------------------------------------------------------------
             # 顺序反过来过：原来是先 trigger_scan() 再 finish_imported()，
@@ -2329,13 +2376,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if p == "/api/import":
             mode = body.get("mode", "files")
+            replace = bool(body.get("replace"))
             if mode not in ("files", "folder"):
                 return self._json({"ok": False, "error": "mode 无效"}, 400)
             if _imp is None:
                 return self._json({"ok": False, "error": "导入模块未加载"}, 500)
-            threading.Thread(target=run_import, args=(mode,),
+            threading.Thread(target=run_import, args=(mode, replace),
                              daemon=True).start()
-            return self._json({"ok": True})
+            return self._json({"ok": True, "replace": replace})
         if p == "/api/config":
             cfg = body.get("config")
             if not isinstance(cfg, dict):

@@ -18,9 +18,12 @@
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
+import unicodedata
 import urllib.request
 import uuid
 
@@ -461,12 +464,16 @@ def decode_encrypted(files, decoder, ffprobe, workdir, log=print):
     return plain, outdir
 
 
-def import_songs(paths, cfg, ffprobe, tag_py, log=print, decoder=None):
+def import_songs(paths, cfg, ffprobe, tag_py, log=print, decoder=None,
+                 replace=False):
     """执行导入。返回统计 dict
 
     decoder 是 music_decode.exe 的路径（可选）。给了它，选中的加密音乐
     （ncm/qmc/kgm/vpr/kgg）会先**解码成普通 flac/mp3** 再走后面的校验；
     不给就只收普通音频。
+
+    replace=True 进入**替换模式**：曲库里同名的旧文件会被这份替换并删除，
+    不看规格高低（用于「自动下载下错了歌」时手工纠正）。
     """
     lib = cfg["sync"]["downloads_dir"]
     accept_lossy = bool(cfg.get("import", {}).get("accept_lossy", True))
@@ -508,18 +515,94 @@ def import_songs(paths, cfg, ffprobe, tag_py, log=print, decoder=None):
 
     try:
         return _import_plain(files, lib, cfg, ffprobe, tag_py,
-                             accept_lossy, block_rates, block_ch, log)
+                             accept_lossy, block_rates, block_ch, log,
+                             replace=replace)
     finally:
         # 解码出来的临时副本用完就删 —— 真正入库的是拷进同步文件夹那份
         if decoded_dir:
             shutil.rmtree(os.path.dirname(decoded_dir), ignore_errors=True)
 
 
+def _norm_stem(stem):
+    """同名判定用的规范化：全角→半角、大小写、空白。
+
+    只抹平「写法差异」，**不动标点** —— 否则 "Song (Live)" 会和 "Song"
+    被判成同一首，替换模式就会删错文件。
+    """
+    s = unicodedata.normalize("NFKC", stem or "").casefold()
+    return re.sub(r"\s+", "", s)
+
+
+def _spec(info):
+    """把 probe() 的结果写成「96kHz/24bit flac」这种人看的样子"""
+    if not info:
+        return "读不出规格"
+    rate = (info.get("rate") or 0) / 1000
+    return (f"{rate:g}kHz"
+            + (f"/{info['bits']}bit" if info.get("bits") else "")
+            + f" {info.get('codec') or '?'}")
+
+
+def _drop_same_name(lib, stem, keep_path, log=print):
+    """删掉曲库里所有「同名（规范化后相同）」的旧音频，keep_path 留着。
+
+    替换模式专用：名字相同就是同一首，旧的那份必须走人，否则曲库里会
+    出现两首同名的歌 —— 用户报的「不同的歌叫同一个名字」就是这个现象。
+    """
+    want = _norm_stem(stem)
+    keep = os.path.abspath(keep_path)
+    gone = 0
+    try:
+        names = os.listdir(lib)
+    except OSError:
+        return gone
+    for fn in names:
+        base, e = os.path.splitext(fn)
+        if e.lower() not in AUDIO_EXT:
+            continue
+        if _norm_stem(base) != want:
+            continue
+        p = os.path.join(lib, fn)
+        if os.path.abspath(p) == keep:
+            continue
+        try:
+            os.remove(p)
+            gone += 1
+            log(f"      已删除同名旧文件: {fn}")
+        except OSError as exc:
+            log(f"      ⚠ 同名旧文件删不掉（可能正被同步/播放占用）: {fn}（{exc}）")
+    return gone
+
+
+def _replace_retry(tmp, dst, attempts=6, delay=0.8):
+    """os.replace 的容错版（替换模式要覆盖的正是已有文件）。
+
+    曲库是 Syncthing 的 sendonly 目录，它偶尔正在读某个文件时会给它加锁
+    （WinError 32），此时 os.replace 直接失败。实测这类锁只持续几秒，
+    重试即可，所以这里退避重试而不是一撞就报错。
+    """
+    last = None
+    for _ in range(attempts):
+        try:
+            os.replace(tmp, dst)
+            return
+        except PermissionError as exc:      # WinError 32
+            last = exc
+            time.sleep(delay)
+    raise last if last is not None else OSError("replace 失败")
+
+
 def _import_plain(files, lib, cfg, ffprobe, tag_py,
-                  accept_lossy, block_rates, block_ch, log=print):
-    """导入流程本体（文件都已经是普通音频了）"""
+                  accept_lossy, block_rates, block_ch, log=print,
+                  replace=False):
+    """导入流程本体（文件都已经是普通音频了）
+
+    replace=True 时进入**替换模式**：同名即替换，不看规格高低，
+    并把曲库里同名的其它旧文件一并删掉。
+    """
     if not files:
-        return {"total": 0, "ok": 0, "skip": 0, "fail": 0}
+        return {"total": 0, "ok": 0, "skip": 0, "fail": 0,
+                "tagged": 0, "replaced": 0, "imported": []}
 
     tagmod = None
     try:
@@ -527,7 +610,8 @@ def _import_plain(files, lib, cfg, ffprobe, tag_py,
     except Exception as exc:
         log(f"⚠ 打标签模块加载失败（将跳过打标签）: {exc}", )
 
-    stat = {"total": len(files), "ok": 0, "skip": 0, "fail": 0, "tagged": 0}
+    stat = {"total": len(files), "ok": 0, "skip": 0, "fail": 0, "tagged": 0,
+            "replaced": 0, "imported": []}
     for i, src in enumerate(files, 1):
         name = os.path.basename(src)
         stem = os.path.splitext(name)[0]
@@ -560,36 +644,55 @@ def _import_plain(files, lib, cfg, ffprobe, tag_py,
             stat["skip"] += 1
             continue
 
-        # ---- 3. 同名去重：按实测规格择优 ----
+        # ---- 3. 同名去重 ----
         dst = os.path.join(lib, name)
-        if os.path.exists(dst):
-            same = os.path.getsize(src) == os.path.getsize(dst)
-            if same:
-                log(f"  [{i}/{len(files)}] ⊘ 已存在且大小相同: {name}")
-                stat["skip"] += 1
-                continue
-            old = probe(dst, ffprobe)
-            if quality_score(old) >= quality_score(info):
-                log(f"  [{i}/{len(files)}] ⊘ 已存在且规格不低于导入版: {name}")
-                stat["skip"] += 1
-                continue
-            log(f"  [{i}/{len(files)}] ↑ 已存在但规格更低，替换: {name}")
+        overwriting = False
+        if replace:
+            # 替换模式：名字相同 = 同一首歌，**一律以这次导入的为准**。
+            #
+            # 为什么这里故意不看规格（与下面的「自动择优」相反）：
+            # 用户开这个模式，正是因为自动下载「下错了歌」。错的那份常常
+            # 规格更高（比如下成 96kHz 的另一首），若还按「规格高者胜」
+            # 处理，正确的这份会被直接跳过 —— 那这个功能就等于没做。
+            #
+            # 注意：这里只判断、不删。删旧文件放到「新文件已经安全落盘」
+            # 之后（见步骤 4 末尾）—— 万一拷贝失败，旧的还在，不会两头空。
+            overwriting = os.path.exists(dst)
+            if overwriting:
+                old = probe(dst, ffprobe)
+                log(f"  [{i}/{len(files)}] ↻ 替换同名旧文件"
+                    f"（旧 {_spec(old)} → 新 {_spec(info)}）")
+        else:
+            if os.path.exists(dst):
+                same = os.path.getsize(src) == os.path.getsize(dst)
+                if same:
+                    log(f"  [{i}/{len(files)}] ⊘ 已存在且大小相同: {name}")
+                    stat["skip"] += 1
+                    continue
+                old = probe(dst, ffprobe)
+                if quality_score(old) >= quality_score(info):
+                    log(f"  [{i}/{len(files)}] ⊘ 已存在且规格不低于导入版: {name}")
+                    stat["skip"] += 1
+                    continue
+                log(f"  [{i}/{len(files)}] ↑ 已存在但规格更低，替换: {name}")
 
-        # 同名不同扩展名：先清掉其它扩展名的旧版本
-        for other_ext in AUDIO_EXT:
-            other = os.path.join(lib, stem + other_ext)
-            if other_ext != ext and os.path.exists(other):
-                try:
-                    os.remove(other)
-                    log(f"      移除同名异扩展名旧文件: {os.path.basename(other)}")
-                except OSError:
-                    pass
+            # 同名不同扩展名：先清掉其它扩展名的旧版本
+            for other_ext in AUDIO_EXT:
+                other = os.path.join(lib, stem + other_ext)
+                if other_ext != ext and os.path.exists(other):
+                    try:
+                        os.remove(other)
+                        log(f"      移除同名异扩展名旧文件: {os.path.basename(other)}")
+                    except OSError:
+                        pass
 
         # ---- 4. 拷进同步文件夹 ----
         try:
             tmp = dst + ".importing-" + uuid.uuid4().hex[:6]
             shutil.copy2(src, tmp)
-            os.replace(tmp, dst)          # 原子替换，避免同步到半个文件
+            # 原子替换，避免同步到半个文件。替换模式下 dst 本来就存在，
+            # 而 Syncthing 可能正在读它（会短暂加锁），所以走带重试的版本。
+            _replace_retry(tmp, dst)
         except Exception as exc:          # noqa: BLE001
             log(f"  [{i}/{len(files)}] ✗ 拷贝失败: {exc}")
             stat["fail"] += 1
@@ -600,6 +703,14 @@ def _import_plain(files, lib, cfg, ffprobe, tag_py,
                 + f" {info['codec']}")
         log(f"  [{i}/{len(files)}] ✓ 已导入 ({spec}) {name}")
         stat["ok"] += 1
+        stat["imported"].append(stem)
+
+        # 替换模式：**等新文件真的落盘了**才清掉同名的旧副本，
+        # 这样即使拷贝失败也不会出现「旧的删了、新的没进来」。
+        if replace:
+            if overwriting:
+                stat["replaced"] += 1
+            stat["replaced"] += _drop_same_name(lib, stem, dst, log)
 
         # ---- 5. 打标签（复用 tag_files，按文件头判断格式）----
         if tagmod is not None:
@@ -612,7 +723,8 @@ def _import_plain(files, lib, cfg, ffprobe, tag_py,
 
     log("")
     log(f"导入完成：成功 {stat['ok']}，跳过 {stat['skip']}，失败 {stat['fail']}"
-        + (f"，已写标签 {stat['tagged']}" if stat["tagged"] else ""))
+        + (f"，已写标签 {stat['tagged']}" if stat["tagged"] else "")
+        + (f"，替换同名旧文件 {stat['replaced']} 个" if stat["replaced"] else ""))
     return stat
 
 

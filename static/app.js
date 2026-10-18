@@ -149,18 +149,21 @@ async function runStep(id) {
   });
 }
 
-/* 手动导入：弹出系统对话框选文件/文件夹，后端执行导入 */
+/* 手动导入：弹出系统对话框选文件/文件夹，后端执行导入
+   勾了「替换同名旧文件」就是替换模式：同名即替换，不看规格高低 */
 async function doImport(mode) {
+  const replace = !!($('#chk-import-replace') || {}).checked;
   document.querySelectorAll('#btn-import-files, #btn-import-folder, .import-btn')
     .forEach(b => { b.disabled = true; });
   appendLog({ ts: '', level: 'head', message:
-    mode === 'folder' ? '── 导入文件夹：请在弹出的窗口中选择 ──'
-                      : '── 导入歌曲：请在弹出的窗口中选择 ──' });
+    `── ${replace ? '替换导入' : '导入'}${mode === 'folder' ? '文件夹' : '歌曲'}：`
+    + (replace ? '同名的旧文件会被替换并删除 ──'
+               : '请在弹出的窗口中选择 ──') });
   try {
     await fetch('/api/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode })
+      body: JSON.stringify({ mode, replace })
     });
   } catch (e) {
     appendLog({ ts: '', level: 'error', message: '导入请求失败: ' + e });
