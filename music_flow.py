@@ -2381,8 +2381,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if p == "/api/import":
             mode = body.get("mode", "files")
-            replace = bool(body.get("replace"))
-            delete_src = bool(body.get("delete_src"))
+            # 两项都默认开启：前端勾选框默认勾上，这里也把「没传」当成开，
+            # 免得旧缓存页面（只传 mode）落到「不替换、不删源」的旧行为上。
+            replace = bool(body.get("replace", True))
+            delete_src = bool(body.get("delete_src", True))
             if mode not in ("files", "folder"):
                 return self._json({"ok": False, "error": "mode 无效"}, 400)
             if _imp is None:
