@@ -184,7 +184,7 @@ DEFAULT_CONFIG = {
         # 以下三项请填自己的值。仓库里的 config.example.json 是空模板。
         "phone_device": "",
         "api_key": "",
-        "syncthing_gui": "http://127.0.0.1:8384",
+        "syncthing_gui": "http://127.0.0.1:18384",
         "syncthing_exe": r"C:\Program Files\Syncthing\syncthing.exe",
         # 注意：这里**不要**写 shell 风格的引号。
         # Python 的 subprocess 不经过 shell，引号会被当成参数内容的一部分，
@@ -596,7 +596,7 @@ def syncthing_ping(gui, api_key, timeout=5):
     —— 报出具体原因比只说「未响应」有用得多。
     """
     import urllib.request
-    url = (gui or "http://127.0.0.1:8384").rstrip("/") + "/rest/system/status"
+    url = (gui or "http://127.0.0.1:18384").rstrip("/") + "/rest/system/status"
     hdr = {"X-API-Key": api_key} if api_key else {}
     try:
         req = urllib.request.Request(url, headers=hdr)
@@ -605,6 +605,23 @@ def syncthing_ping(gui, api_key, timeout=5):
         return None
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
+
+
+def _syncthing_log_tail(keep=3):
+    """从 Syncthing 自己的日志里捞出最后几条 ERR/WRN。
+
+    「起不来的真正原因」只写在它自己的日志里（例如端口 bind 失败），
+    把它带进报错信息，比只说「120 秒内未响应」有用得多。
+    """
+    path = r"C:\ProgramData\Syncthing\data\syncthing.log"
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()[-200:]
+    except OSError:
+        return ""
+    errs = [ln.strip() for ln in lines if " ERR " in ln]
+    bad = errs or [ln.strip() for ln in lines if " WRN " in ln]
+    return " | ".join(ln[:180] for ln in bad[-keep:])
 
 
 def proc_running(image):
@@ -660,7 +677,8 @@ def s_containers_start(cfg):
 
 def s_syncthing_start(cfg):
     s = cfg["sync"]
-    if not proc_running("syncthing.exe"):
+    was_running = proc_running("syncthing.exe")
+    if not was_running:
         exe = s["syncthing_exe"]
         if not os.path.exists(exe):
             log(f"找不到 syncthing.exe: {exe}", "error")
@@ -672,25 +690,49 @@ def s_syncthing_start(cfg):
         log("Syncthing 进程已在运行")
 
     last_err = None
-    for i in range(60):                       # 60 × 2s = 120s（首次启动可能较慢）
+    t0 = time.time()
+    deadline = t0 + 120                       # 首次启动要建库、要全盘扫描，给足 120 秒
+    next_report = 10.0
+    dead_checks = 0
+    while time.time() < deadline:
         err = syncthing_ping(s["syncthing_gui"], s.get("api_key", ""))
         if err is None:
-            log("Syncthing GUI 就绪", "ok")
+            log(f"Syncthing GUI 就绪（{time.time() - t0:.1f} 秒）", "ok")
             return True
         last_err = err
-        if i % 5 == 4:
-            log(f"  等待 Syncthing GUI… ({(i + 1) * 2}s)")
-        time.sleep(2)
+        # 快速失败：进程是我们拉起来的、却反复不在了，说明它启动后立刻退出。
+        # 最常见的原因是 GUI 端口被系统保留（Hyper-V/WSL 的 excludedportrange），
+        # 这种情况干等满 120 秒毫无意义。
+        if not was_running and time.time() - t0 > 6:
+            dead_checks = 0 if proc_running("syncthing.exe") else dead_checks + 1
+            if dead_checks >= 2:
+                log("Syncthing 启动后立即退出，停止等待", "error")
+                log(f"  最后一次探测错误: {last_err}", "error")
+                tail = _syncthing_log_tail()
+                if tail:
+                    log(f"  Syncthing 日志: {tail}", "error")
+                log("  排查：netsh int ipv4 show excludedportrange protocol=tcp"
+                    " 看端口是否落在系统保留段里", "error")
+                return False
+        elapsed = time.time() - t0
+        if elapsed >= next_report:
+            log(f"  等待 Syncthing GUI… ({elapsed:.0f}s)")
+            next_report += 10
+        time.sleep(1)
 
     log("Syncthing GUI 120 秒内未响应", "error")
     if last_err:
         log(f"  最后一次探测错误: {last_err}", "error")
     log("  排查建议：", "error")
     log("    1) 是否已有另一个 Syncthing 实例占用配置目录（会报 lock 冲突）", "error")
-    log(f"    2) 端口是否被占用：netstat -ano | findstr 8384", "error")
-    log(f"    3) 手动运行看报错：\"{s['syncthing_exe']}\" "
+    log(f"    2) 端口是否被占用：netstat -ano | findstr "
+        f":{s['syncthing_gui'].rsplit(':', 1)[-1]}", "error")
+    log("    3) 端口是否被系统保留（Hyper-V/WSL 会整段占走，Syncthing 只会报 "
+        "\"bind: An attempt was made to access a socket…\"）：", "error")
+    log("       netsh int ipv4 show excludedportrange protocol=tcp", "error")
+    log(f"    4) 手动运行看报错：\"{s['syncthing_exe']}\" "
         + " ".join(s["syncthing_args"]), "error")
-    log(f"    4) 看日志：C:\\ProgramData\\Syncthing\\data\\syncthing.log", "error")
+    log(f"    5) 看日志：C:\\ProgramData\\Syncthing\\data\\syncthing.log", "error")
     return False
 
 

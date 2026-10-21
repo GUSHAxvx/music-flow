@@ -783,7 +783,7 @@ def trigger_scan(cfg, log=print):
     s = cfg.get("sync") or {}
     api_key = s.get("api_key")
     folder = s.get("folder_id")
-    gui = (s.get("syncthing_gui") or "http://127.0.0.1:8384").rstrip("/")
+    gui = (s.get("syncthing_gui") or "http://127.0.0.1:18384").rstrip("/")
     if not api_key or not folder:
         log("（Syncthing 未配置，跳过触发扫描；文件会在下次同步时自动上传）")
         return False

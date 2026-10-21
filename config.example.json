@@ -40,7 +40,7 @@
     "folder_id": "go-music-dl-downloads",
     "phone_device": "",
     "api_key": "",
-    "syncthing_gui": "http://127.0.0.1:8384",
+    "syncthing_gui": "http://127.0.0.1:18384",
     "syncthing_exe": "C:\\Program Files\\Syncthing\\syncthing.exe",
     "syncthing_args": [
       "--config=C:\\ProgramData\\Syncthing\\config",
