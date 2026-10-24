@@ -82,7 +82,8 @@ MUSIC_DECODE = r"D:\music-decode\build\music_decode.exe"
 # 引擎暂存的宿主直连路径（library-manager.ps1 里的 $stagingDirect，
 # 容器 /app/data/hires_staging 就 bind 挂载在这里）
 HIRES_STAGING = os.path.join(MONITOR, "config", "monitor", "hires_staging")
-# 本机暂存副本（library-manager.ps1 里的 $staging）
+# 本机暂存副本：2026-10-24 起 library-manager 不再用 robocopy 镜像这一份，
+# 所以它**通常不存在**；各处都按「不存在就跳过」处理，保留常量只为向后兼容。
 LOCAL_STAGING = os.path.join(MONITOR, "_staging")
 
 # 加密音乐容器的扩展名。**这份清单必须和解码器的判定保持一致**
@@ -995,11 +996,11 @@ def s_decode(cfg):
         log(f"找不到解码器 {exe}，跳过（加密文件这一轮仍会被闸门丢掉）", "warn")
         return True
 
-    # 两个暂存目录都要解，而且**必须都解**：
+    # 暂存目录都要扫一遍：
     #   hires_staging —— 容器直连的宿主目录（容器 /app/data/hires_staging）
-    #   _staging      —— library-manager 用 robocopy /MIR 镜像出来的本机副本
-    # library-manager 的闸门跑在 _staging 上，而 /MIR 会用容器那份覆盖它，
-    # 只解一边的话，另一边下一轮就把解密结果盖回去了。
+    #   _staging      —— 历史的本机镜像副本，2026-10-24 起一般不存在（在就顺手解掉）
+    # 以前闸门跑在 _staging 上、而 /MIR 会用容器那份覆盖它，只解一边会被盖回去；
+    # 现在只剩一个真目录，这个双目录循环纯属向后兼容。
     targets = []
     for root in (HIRES_STAGING, LOCAL_STAGING):
         if os.path.isdir(root):
@@ -1352,16 +1353,18 @@ def _copy_library_to(src, dst):
 def s_coverback(cfg):
     """把曲库里⑤/⑦改过的文件回写到暂存目录。
 
-    为什么要回写**两个**暂存目录（2026-10-15 实测踩到的坑）
-    ----------------------------------------------------
-    `_staging` 不是源头，它只是 library-manager 阶段 2 用
-    `robocopy $stagingDirect $staging /MIR` 从 `hires_staging` 镜像出来的副本。
-    只回写 `_staging` 的话，下一轮⑥一开始就会：
+    为什么必须回写到 hires_staging（2026-10-15 实测踩到的坑）
+    ------------------------------------------------------
+    当时回写只写 `_staging`（library-manager 阶段 2 用
+    `robocopy $stagingDirect $staging /MIR` 从 `hires_staging` 镜像出来的副本），
+    于是下一轮⑥一开始就会：
         阶段 2  /MIR 用 hires_staging 覆盖 _staging   -> 回写成果全没了
         阶段 3  /MIR 内容比对又发现「不同」            -> 又整份覆盖 109~137 个
         阶段 5  刚补好的标签又被覆盖回原始版本         -> 又「需补写 71 个」
     实测：只回写 _staging 时，下一轮⑥照样落盘 109 个、⑤照样重写 71 个。
-    所以必须**沿着数据流往上游回写**，回到镜像的源头 hires_staging。
+    结论：必须**沿着数据流往上游回写**，也就是 hires_staging。
+    2026-10-24 起 `_staging` 这份镜像本身已取消（闸门与落盘直接读 hires_staging），
+    所以回写目标只剩 hires_staging 一个。
 
     不做的事（刻意为之）：
       * 不新增任何数据库 / 队列 / 同步历史 —— 就是一次目录比对
@@ -1372,8 +1375,13 @@ def s_coverback(cfg):
     if not os.path.isdir(lib):
         log(f"曲库目录不存在 {lib}，跳过", "warn")
         return True
-    targets = [cfg["sync"].get("staging_dir") or LOCAL_STAGING,
-               HIRES_STAGING]
+    # 2026-10-24：_staging 镜像已取消，回写目标只剩真正的源头。
+    # config 的 staging_dir 覆盖项仍保留，但只在你显式配置时才生效。
+    targets = []
+    _stg_override = cfg["sync"].get("staging_dir")
+    if _stg_override:
+        targets.append(_stg_override)
+    targets.append(HIRES_STAGING)
     seen = set()
     failed_total = 0
     for stg in targets:
@@ -2177,7 +2185,7 @@ def _drop_staging_same_name(stems, log=print):
 
     为什么必须删
     ------------
-    `hires_staging` / `_staging` 是 ⑥落盘的数据源。只在曲库里替换的话，
+    `hires_staging` 是 ⑥落盘的数据源。只在曲库里替换的话，
     下一轮 ⑥ 会拿暂存里那份**旧的错歌**再落盘一次，替换成果当场被冲掉，
     用户看到的就是「刚换完，一跑流程又变回错的」。
     """
